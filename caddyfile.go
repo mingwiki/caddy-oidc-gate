@@ -106,6 +106,12 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				h.LogoutRedirect = d.Val()
+			case "allowed_users":
+				args := d.RemainingArgs()
+				if len(args) == 0 {
+					return d.ArgErr()
+				}
+				h.AllowedUsers = args
 			case "refresh_leeway":
 				if !d.NextArg() {
 					return d.ArgErr()

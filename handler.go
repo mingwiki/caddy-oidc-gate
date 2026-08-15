@@ -41,6 +41,10 @@ type Handler struct {
 	InjectHeaders bool   `json:"inject_headers,omitempty"`
 	HeaderPrefix  string `json:"header_prefix,omitempty"`
 
+	// AllowedUsers optionally restricts which users may log in. When empty,
+	// any successfully authenticated user is allowed (backward compatible).
+	AllowedUsers []string `json:"allowed_users,omitempty"`
+
 	LogoutRedirect string `json:"logout_redirect,omitempty"`
 
 	RefreshLeeway      caddy.Duration `json:"refresh_leeway,omitempty"`
@@ -181,4 +185,25 @@ func (h Handler) injectHeaders(r *http.Request, rawIDToken string) {
 		r.Header.Set(h.HeaderPrefix+"Name", prefName)
 	}
 	r.Header.Set(h.HeaderPrefix+"Issuer", idToken.Issuer)
+}
+
+// userAllowed 校验 id_token claims 中的用户名是否在白名单内。
+// 未配置 allowed_users 时不限制（向后兼容）；匹配 preferred_username，缺失时回退 name。
+func userAllowed(allowedUsers []string, claims map[string]interface{}) bool {
+	if len(allowedUsers) == 0 {
+		return true
+	}
+	username, _ := claims["preferred_username"].(string)
+	if username == "" {
+		username, _ = claims["name"].(string)
+	}
+	if username == "" {
+		return false
+	}
+	for _, allowed := range allowedUsers {
+		if username == allowed {
+			return true
+		}
+	}
+	return false
 }

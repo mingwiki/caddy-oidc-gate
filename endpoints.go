@@ -2,6 +2,7 @@ package caddyauthoidc
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/url"
 	"time"
@@ -115,6 +116,19 @@ func (h Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 	if idToken.Nonce != fs.Nonce {
 		h.logger.Warn("nonce mismatch")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return nil
+	}
+
+	var claims map[string]interface{}
+	if err := idToken.Claims(&claims); err != nil {
+		h.logger.Error("failed to decode id token claims", zap.Error(err))
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return nil
+	}
+
+	if !userAllowed(h.AllowedUsers, claims) {
+		h.logger.Warn("user not in allowed_users", zap.String("username", fmt.Sprint(claims["preferred_username"])))
+		http.Error(w, "Access denied: user not allowed", http.StatusForbidden)
 		return nil
 	}
 
