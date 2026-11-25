@@ -13,6 +13,9 @@ import (
 )
 
 func (h *Handler) serveLogin(w http.ResponseWriter, r *http.Request) error {
+	if !h.authReady(w) {
+		return nil
+	}
 	w.Header().Set("Cache-Control", "no-store")
 
 	returnTo := r.URL.Query().Get("return_to")
@@ -71,6 +74,9 @@ func (h *Handler) serveLogin(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
+	if !h.authReady(w) {
+		return nil
+	}
 	w.Header().Set("Cache-Control", "no-store")
 
 	fs, err := h.readFlowStateCookie(r)
@@ -158,6 +164,9 @@ func (h *Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h *Handler) serveLogout(w http.ResponseWriter, r *http.Request) error {
+	if !h.authReady(w) {
+		return nil
+	}
 	w.Header().Set("Cache-Control", "no-store")
 
 	// Logout is a state change reachable via top-level GET navigation, so refuse

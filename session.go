@@ -13,7 +13,14 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
-const flowCookieSuffix = "_flow"
+const (
+	flowCookieSuffix = "_flow"
+
+	// cookieVersion guards the encoded payload shape: a cookie written by an
+	// older/newer build decodes to zero values for unknown fields, which would
+	// silently look like a valid session, so the version is checked instead.
+	cookieVersion = 1
+)
 
 var (
 	ErrCookieNotFound = errors.New("auth_oidc: cookie not found")
@@ -22,6 +29,7 @@ var (
 )
 
 type flowState struct {
+	Version      int
 	State        string
 	Nonce        string
 	PKCEVerifier string
@@ -29,6 +37,7 @@ type flowState struct {
 }
 
 type sessionData struct {
+	Version      int
 	IDToken      string
 	RefreshToken string
 	ExpiresAt    time.Time
@@ -110,6 +119,7 @@ func (h *Handler) setFlowStateCookie(w http.ResponseWriter, r *http.Request, sta
 	if h.flowCodec == nil {
 		return errors.New("auth_oidc: flow codec not initialized")
 	}
+	state.Version = cookieVersion
 	name := h.flowStateCookieName()
 	encoded, err := h.flowCodec.Encode(name, state)
 	if err != nil {
@@ -137,6 +147,9 @@ func (h *Handler) readFlowStateCookie(r *http.Request) (flowState, error) {
 	if err := h.flowCodec.Decode(name, c.Value, &out); err != nil {
 		return flowState{}, classifyCookieDecodeErr(err)
 	}
+	if out.Version != cookieVersion {
+		return flowState{}, fmt.Errorf("%w: unsupported flow cookie version %d", ErrCookieInvalid, out.Version)
+	}
 	return out, nil
 }
 
@@ -148,6 +161,7 @@ func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, sess 
 	if h.sessionCodec == nil {
 		return errors.New("auth_oidc: session codec not initialized")
 	}
+	sess.Version = cookieVersion
 	name := h.CookieName
 	encoded, err := h.sessionCodec.Encode(name, sess)
 	if err != nil {
@@ -173,6 +187,9 @@ func (h *Handler) readSessionCookie(r *http.Request) (sessionData, error) {
 	var out sessionData
 	if err := h.sessionCodec.Decode(h.CookieName, c.Value, &out); err != nil {
 		return sessionData{}, classifyCookieDecodeErr(err)
+	}
+	if out.Version != cookieVersion {
+		return sessionData{}, fmt.Errorf("%w: unsupported session cookie version %d", ErrCookieInvalid, out.Version)
 	}
 	if !out.ExpiresAt.IsZero() && time.Now().After(out.ExpiresAt) {
 		return sessionData{}, ErrCookieExpired

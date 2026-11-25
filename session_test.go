@@ -28,6 +28,7 @@ func TestFlowStateCookie_RoundTripAndAttributes(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	in := flowState{
+		Version:      cookieVersion,
 		State:        "state123",
 		Nonce:        "nonce123",
 		PKCEVerifier: "verifier123",
@@ -131,6 +132,7 @@ func TestSessionCookie_RoundTripAndSecureOverride(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	in := sessionData{
+		Version:      cookieVersion,
 		IDToken:      "jwt",
 		RefreshToken: "rt",
 		ExpiresAt:    time.Now().Add(10 * time.Minute).UTC(),
@@ -154,6 +156,51 @@ func TestSessionCookie_RoundTripAndSecureOverride(t *testing.T) {
 	}
 	if out != in {
 		t.Fatalf("round-trip mismatch: %#v != %#v", out, in)
+	}
+}
+
+func TestSessionCookie_RejectsUnknownVersion(t *testing.T) {
+	h := &Handler{Provider: "https://issuer.example", ClientID: "client", ClientSecret: "secret"}
+	h.applyDefaults()
+	if err := h.initCookieCodecs(); err != nil {
+		t.Fatalf("initCookieCodecs: %v", err)
+	}
+
+	encoded, err := h.sessionCodec.Encode(h.CookieName, sessionData{
+		Version:   cookieVersion + 1,
+		IDToken:   "jwt",
+		ExpiresAt: time.Now().Add(time.Hour).UTC(),
+	})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	r.AddCookie(&http.Cookie{Name: h.CookieName, Value: encoded})
+
+	if _, err := h.readSessionCookie(r); !errors.Is(err, ErrCookieInvalid) {
+		t.Fatalf("expected ErrCookieInvalid for unknown version, got %v", err)
+	}
+}
+
+func TestFlowStateCookie_RejectsUnknownVersion(t *testing.T) {
+	h := &Handler{Provider: "https://issuer.example", ClientID: "client", ClientSecret: "secret"}
+	h.applyDefaults()
+	if err := h.initCookieCodecs(); err != nil {
+		t.Fatalf("initCookieCodecs: %v", err)
+	}
+
+	name := h.flowStateCookieName()
+	encoded, err := h.flowCodec.Encode(name, flowState{Version: cookieVersion + 1, State: "s", Nonce: "n"})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	r.AddCookie(&http.Cookie{Name: name, Value: encoded})
+
+	if _, err := h.readFlowStateCookie(r); !errors.Is(err, ErrCookieInvalid) {
+		t.Fatalf("expected ErrCookieInvalid for unknown version, got %v", err)
 	}
 }
 

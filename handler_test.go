@@ -533,3 +533,18 @@ func TestServeHTTP_ProviderOutageReturns503ThenRecovers(t *testing.T) {
 		t.Fatalf("Location = %q", w.Header().Get("Location"))
 	}
 }
+
+func TestAuthEndpointsAnswer503BeforeProviderIsReady(t *testing.T) {
+	h := newHandler(t, newIdP(t)) // deliberately without initOIDC
+
+	for path, serve := range authRoutes {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, "http://example.com"+path, nil)
+		if err := serve(h, w, r); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
+		if w.Code != http.StatusServiceUnavailable {
+			t.Fatalf("%s: expected 503, got %d", path, w.Code)
+		}
+	}
+}

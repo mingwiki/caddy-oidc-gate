@@ -21,6 +21,22 @@ func init() {
 	caddy.RegisterModule(&Handler{})
 }
 
+// Fixed auth paths. They are the only routing knowledge in the plugin: the
+// middleware dispatch, the login redirect and the callback redirect_uri all
+// read them from here.
+const (
+	pathAuthPrefix = "/auth/"
+	pathLogin      = pathAuthPrefix + "login"
+	pathCallback   = pathAuthPrefix + "callback"
+	pathLogout     = pathAuthPrefix + "logout"
+)
+
+var authRoutes = map[string]func(*Handler, http.ResponseWriter, *http.Request) error{
+	pathLogin:    (*Handler).serveLogin,
+	pathCallback: (*Handler).serveCallback,
+	pathLogout:   (*Handler).serveLogout,
+}
+
 type Handler struct {
 	Provider string `json:"provider,omitempty"`
 
@@ -97,13 +113,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return nil
 	}
 
-	switch r.URL.Path {
-	case "/auth/login":
-		return h.serveLogin(w, r)
-	case "/auth/callback":
-		return h.serveCallback(w, r)
-	case "/auth/logout":
-		return h.serveLogout(w, r)
+	if serve, ok := authRoutes[r.URL.Path]; ok {
+		return serve(h, w, r)
 	}
 
 	h.stripAuthHeaders(r)
@@ -114,7 +125,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 	}
 
-	loginURL := url.URL{Path: "/auth/login"}
+	loginURL := url.URL{Path: pathLogin}
 	q := loginURL.Query()
 	q.Set("return_to", r.URL.RequestURI())
 	loginURL.RawQuery = q.Encode()
@@ -150,6 +161,16 @@ func (h *Handler) ensureOIDC(ctx context.Context) error {
 	h.lastInitErr = nil
 	h.logger.Info("oidc provider ready", zap.String("discovery_url", h.Provider))
 	return nil
+}
+
+// authReady reports whether the provider is initialised, answering 503 when it
+// is not. It keeps the auth endpoints safe to call without ServeHTTP's gate.
+func (h *Handler) authReady(w http.ResponseWriter) bool {
+	if h.verifier != nil {
+		return true
+	}
+	http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+	return false
 }
 
 // authenticate returns the verified ID token for the request, refreshing the
