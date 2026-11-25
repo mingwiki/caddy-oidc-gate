@@ -171,6 +171,8 @@ to differ.
 - **Provider Configuration:** Ensure the OIDC provider is configured to accept callback URLs for *all* subdomains using the plugin (e.g. `https://app1.example.com/auth/callback`, `https://app2.example.com/auth/callback`).
 - **Cookie Domain:** Keep the `cookie_domain` as narrow as possible. Use a leading dot (e.g. `.example.com`) to cover subdomains.
 - **Reverse Proxies:** If running Caddy behind another reverse proxy, ensure `trusted_proxies` is configured correctly so Caddy knows the original protocol and host.
+- **Authorization:** The plugin only authenticates users; who may log in is decided by the OIDC provider (e.g. Pocket ID users/groups).
+- **Identity Headers:** Client-supplied headers with `header_prefix` are stripped before the verified claims are injected, so upstream apps can trust them.
 - **Secrets:** Treat the `client_secret` with care. The plugin uses it to derive encryption and signing keys for the session cookie. Rotating the `client_secret` will invalidate all active sessions.
 
 ## Development Guide
@@ -179,7 +181,7 @@ If you want to modify this plugin or build it from local source code, follow the
 
 ### Prerequisites
 
-- Go 1.22 or higher
+- Go 1.25 or higher
 - [xcaddy](https://github.com/caddyserver/xcaddy) installed (`go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest`)
 
 ### Running Tests

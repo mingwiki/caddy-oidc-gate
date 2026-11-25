@@ -2,9 +2,10 @@ package caddyauthoidc
 
 import (
 	"context"
-	"fmt"
+	"crypto/subtle"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -34,7 +35,7 @@ func (h Handler) serveLogin(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	returnTo := r.URL.Query().Get("return_to")
-	if returnTo == "" {
+	if !isLocalPath(returnTo) {
 		returnTo = "/"
 	}
 
@@ -73,13 +74,22 @@ func (h Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 	// Clear flow state cookie
 	h.clearFlowStateCookie(w, r)
 
-	if r.URL.Query().Get("state") != fs.State {
+	q := r.URL.Query()
+	if providerErr := q.Get("error"); providerErr != "" {
+		h.logger.Warn("provider returned error",
+			zap.String("error", providerErr),
+			zap.String("description", q.Get("error_description")))
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return nil
+	}
+
+	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(fs.State)) != 1 {
 		h.logger.Warn("state mismatch")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return nil
 	}
 
-	code := r.URL.Query().Get("code")
+	code := q.Get("code")
 	if code == "" {
 		h.logger.Warn("no code in callback")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -119,19 +129,6 @@ func (h Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 
-	var claims map[string]interface{}
-	if err := idToken.Claims(&claims); err != nil {
-		h.logger.Error("failed to decode id token claims", zap.Error(err))
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return nil
-	}
-
-	if !userAllowed(h.AllowedUsers, claims) {
-		h.logger.Warn("user not in allowed_users", zap.String("username", fmt.Sprint(claims["preferred_username"])))
-		http.Error(w, "Access denied: user not allowed", http.StatusForbidden)
-		return nil
-	}
-
 	sess := sessionData{
 		IDToken:      rawIDToken,
 		RefreshToken: oauth2Token.RefreshToken,
@@ -160,9 +157,6 @@ func (h Handler) serveLogout(w http.ResponseWriter, r *http.Request) error {
 	h.clearSessionCookie(w, r)
 
 	redirectURL := h.LogoutRedirect
-	if redirectURL == "" {
-		redirectURL = "/"
-	}
 
 	// Best-effort provider end-session
 	if h.provider != nil {
@@ -190,6 +184,15 @@ func (h Handler) serveLogout(w http.ResponseWriter, r *http.Request) error {
 
 	http.Redirect(w, r, redirectURL, http.StatusFound)
 	return nil
+}
+
+// isLocalPath reports whether p is a same-origin absolute path, so a return_to
+// value cannot be turned into an open redirect (//host and /\\host are rejected).
+func isLocalPath(p string) bool {
+	return strings.HasPrefix(p, "/") &&
+		!strings.HasPrefix(p, "//") &&
+		!strings.HasPrefix(p, "/\\") &&
+		!strings.ContainsAny(p, "\r\n")
 }
 
 func (h Handler) getAbsoluteRedirectURL(r *http.Request, target string) string {

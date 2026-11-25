@@ -9,14 +9,13 @@ import (
 )
 
 const (
-	defaultCookieName         = "caddy_auth_oidc"
-	defaultCookiePath         = "/"
-	defaultCookieTTL          = caddy.Duration(168 * time.Hour)
-	defaultStateTTL           = caddy.Duration(10 * time.Minute)
-	defaultHeaderPrefix       = "X-Auth-"
-	defaultLogoutRedirect     = "/"
-	defaultRefreshLeeway      = caddy.Duration(2 * time.Minute)
-	defaultMinRefreshInterval = caddy.Duration(30 * time.Second)
+	defaultCookieName     = "caddy_auth_oidc"
+	defaultCookiePath     = "/"
+	defaultCookieTTL      = caddy.Duration(168 * time.Hour)
+	defaultStateTTL       = caddy.Duration(10 * time.Minute)
+	defaultHeaderPrefix   = "X-Auth-"
+	defaultLogoutRedirect = "/"
+	defaultRefreshLeeway  = caddy.Duration(2 * time.Minute)
 )
 
 var defaultScopes = []string{"openid", "profile", "email"}
@@ -46,9 +45,6 @@ func (h *Handler) applyDefaults() {
 	if h.RefreshLeeway == 0 {
 		h.RefreshLeeway = defaultRefreshLeeway
 	}
-	if h.MinRefreshInterval == 0 {
-		h.MinRefreshInterval = defaultMinRefreshInterval
-	}
 	if h.ForceHTTPSCookie == nil {
 		v := true
 		h.ForceHTTPSCookie = &v
@@ -76,9 +72,6 @@ func (h Handler) validate() error {
 	}
 	if h.RefreshLeeway < 0 {
 		return fmt.Errorf("refresh_leeway must be non-negative")
-	}
-	if h.MinRefreshInterval < 0 {
-		return fmt.Errorf("min_refresh_interval must be non-negative")
 	}
 	return nil
 }

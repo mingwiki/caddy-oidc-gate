@@ -106,12 +106,6 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				h.LogoutRedirect = d.Val()
-			case "allowed_users":
-				args := d.RemainingArgs()
-				if len(args) == 0 {
-					return d.ArgErr()
-				}
-				h.AllowedUsers = args
 			case "refresh_leeway":
 				if !d.NextArg() {
 					return d.ArgErr()
@@ -121,15 +115,6 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.Errf("invalid refresh_leeway: %v", err)
 				}
 				h.RefreshLeeway = caddy.Duration(dur)
-			case "min_refresh_interval":
-				if !d.NextArg() {
-					return d.ArgErr()
-				}
-				dur, err := caddy.ParseDuration(d.Val())
-				if err != nil {
-					return d.Errf("invalid min_refresh_interval: %v", err)
-				}
-				h.MinRefreshInterval = caddy.Duration(dur)
 			case "force_https_cookie":
 				if d.NextArg() {
 					v, err := strconv.ParseBool(d.Val())

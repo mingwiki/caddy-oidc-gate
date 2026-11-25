@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -41,14 +42,9 @@ type Handler struct {
 	InjectHeaders bool   `json:"inject_headers,omitempty"`
 	HeaderPrefix  string `json:"header_prefix,omitempty"`
 
-	// AllowedUsers optionally restricts which users may log in. When empty,
-	// any successfully authenticated user is allowed (backward compatible).
-	AllowedUsers []string `json:"allowed_users,omitempty"`
-
 	LogoutRedirect string `json:"logout_redirect,omitempty"`
 
-	RefreshLeeway      caddy.Duration `json:"refresh_leeway,omitempty"`
-	MinRefreshInterval caddy.Duration `json:"min_refresh_interval,omitempty"`
+	RefreshLeeway caddy.Duration `json:"refresh_leeway,omitempty"`
 
 	ForceHTTPSCookie *bool `json:"force_https_cookie,omitempty"`
 
@@ -94,11 +90,12 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 		return h.serveLogout(w, r)
 	}
 
-	if sess, ok := h.hasSessionCookie(w, r); ok {
-		if h.InjectHeaders {
-			h.injectHeaders(r, sess.IDToken)
+	h.stripAuthHeaders(r)
+
+	if sess, ok := h.session(w, r); ok {
+		if !h.InjectHeaders || h.injectHeaders(w, r, sess.IDToken) {
+			return next.ServeHTTP(w, r)
 		}
-		return next.ServeHTTP(w, r)
 	}
 
 	loginURL := url.URL{Path: "/auth/login"}
@@ -109,68 +106,90 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 	return nil
 }
 
-func (h Handler) hasSessionCookie(w http.ResponseWriter, r *http.Request) (sessionData, bool) {
+// session returns the session for r when its cookie is valid, refreshing the
+// ID token when it is near expiry. A session that cannot be refreshed is
+// cleared so the browser performs a clean login instead of retrying the
+// refresh on every request.
+func (h *Handler) session(w http.ResponseWriter, r *http.Request) (sessionData, bool) {
 	sess, err := h.readSessionCookie(r)
 	if err != nil {
 		return sessionData{}, false
 	}
-
-	// Check if refresh is needed
-	if sess.RefreshToken != "" && time.Until(sess.ExpiresAt) < time.Duration(h.RefreshLeeway) {
-		h.logger.Debug("session near expiry, attempting refresh")
-
-		ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-		defer cancel()
-
-		token := &oauth2.Token{RefreshToken: sess.RefreshToken}
-		tokenSource := h.oauth2Config.TokenSource(ctx, token)
-		newToken, err := tokenSource.Token()
-		if err != nil {
-			h.logger.Warn("token refresh failed", zap.Error(err))
-			return sessionData{}, false // Force re-login
-		}
-
-		if newToken.AccessToken != token.AccessToken || newToken.RefreshToken != token.RefreshToken {
-			rawIDToken, ok := newToken.Extra("id_token").(string)
-			if ok {
-				// Verify the new ID token
-				if idToken, err := h.verifier.Verify(ctx, rawIDToken); err == nil {
-					sess.IDToken = rawIDToken
-					if newToken.RefreshToken != "" {
-						sess.RefreshToken = newToken.RefreshToken
-					}
-					sess.ExpiresAt = idToken.Expiry
-
-					if err := h.setSessionCookie(w, r, sess); err != nil {
-						h.logger.Error("failed to set refreshed session cookie", zap.Error(err))
-					} else {
-						h.logger.Debug("session refreshed successfully")
-					}
-				} else {
-					h.logger.Warn("failed to verify refreshed id token", zap.Error(err))
-					return sessionData{}, false
-				}
-			}
-		}
+	if sess.RefreshToken == "" || time.Until(sess.ExpiresAt) >= time.Duration(h.RefreshLeeway) {
+		return sess, true
 	}
 
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+
+	// The access token is only a cache hint for oauth2; the refresh token alone
+	// is enough to request a new pair.
+	token, err := h.oauth2Config.TokenSource(ctx, &oauth2.Token{RefreshToken: sess.RefreshToken}).Token()
+	if err != nil {
+		h.logger.Warn("token refresh failed, clearing session", zap.Error(err))
+		h.clearSessionCookie(w, r)
+		return sessionData{}, false
+	}
+
+	rawIDToken, _ := token.Extra("id_token").(string)
+	idToken, err := h.verifier.Verify(ctx, rawIDToken)
+	if err != nil {
+		h.logger.Warn("failed to verify refreshed id token, clearing session", zap.Error(err))
+		h.clearSessionCookie(w, r)
+		return sessionData{}, false
+	}
+
+	var claims map[string]interface{}
+	if err := idToken.Claims(&claims); err != nil {
+		h.logger.Warn("failed to decode refreshed id token claims, clearing session", zap.Error(err))
+		h.clearSessionCookie(w, r)
+		return sessionData{}, false
+	}
+
+	sess.IDToken = rawIDToken
+	if token.RefreshToken != "" {
+		sess.RefreshToken = token.RefreshToken
+	}
+	sess.ExpiresAt = idToken.Expiry
+	if err := h.setSessionCookie(w, r, sess); err != nil {
+		h.logger.Error("failed to set refreshed session cookie", zap.Error(err))
+	}
 	return sess, true
 }
 
-func (h Handler) injectHeaders(r *http.Request, rawIDToken string) {
-	// Best effort ID token decode (without full verification since it's already verified)
-	// Just to extract claims for headers.
+// stripAuthHeaders removes client-supplied headers with the configured prefix
+// so upstream apps can trust injected identity headers.
+func (h Handler) stripAuthHeaders(r *http.Request) {
+	prefix := http.CanonicalHeaderKey(h.HeaderPrefix)
+	if prefix == "" {
+		return
+	}
+	for name := range r.Header {
+		if strings.HasPrefix(name, prefix) {
+			r.Header.Del(name)
+		}
+	}
+}
+
+// injectHeaders adds the verified claims to the request. It reports whether the
+// ID token could be verified; an unverifiable session is cleared and the caller
+// redirects to login.
+func (h Handler) injectHeaders(w http.ResponseWriter, r *http.Request, rawIDToken string) bool {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 
 	idToken, err := h.verifier.Verify(ctx, rawIDToken)
 	if err != nil {
-		return
+		h.logger.Warn("failed to verify session id token, clearing session", zap.Error(err))
+		h.clearSessionCookie(w, r)
+		return false
 	}
 
 	var claims map[string]interface{}
 	if err := idToken.Claims(&claims); err != nil {
-		return
+		h.logger.Warn("failed to decode session id token claims, clearing session", zap.Error(err))
+		h.clearSessionCookie(w, r)
+		return false
 	}
 
 	if sub, ok := claims["sub"].(string); ok {
@@ -185,25 +204,5 @@ func (h Handler) injectHeaders(r *http.Request, rawIDToken string) {
 		r.Header.Set(h.HeaderPrefix+"Name", prefName)
 	}
 	r.Header.Set(h.HeaderPrefix+"Issuer", idToken.Issuer)
-}
-
-// userAllowed 校验 id_token claims 中的用户名是否在白名单内。
-// 未配置 allowed_users 时不限制（向后兼容）；匹配 preferred_username，缺失时回退 name。
-func userAllowed(allowedUsers []string, claims map[string]interface{}) bool {
-	if len(allowedUsers) == 0 {
-		return true
-	}
-	username, _ := claims["preferred_username"].(string)
-	if username == "" {
-		username, _ = claims["name"].(string)
-	}
-	if username == "" {
-		return false
-	}
-	for _, allowed := range allowedUsers {
-		if username == allowed {
-			return true
-		}
-	}
-	return false
+	return true
 }

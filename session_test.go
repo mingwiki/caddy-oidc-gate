@@ -113,15 +113,14 @@ func TestFlowStateCookie_TTLExpiry(t *testing.T) {
 func TestSessionCookie_RoundTripAndSecureOverride(t *testing.T) {
 	forceFalse := false
 	h := Handler{
-		Provider:           "https://issuer.example",
-		ClientID:           "client",
-		ClientSecret:       "secret",
-		ForceHTTPSCookie:   &forceFalse,
-		CookieDomain:       "",
-		CookiePath:         "/",
-		CookieTTL:          caddyDuration(30 * time.Minute),
-		RefreshLeeway:      caddyDuration(0),
-		MinRefreshInterval: caddyDuration(0),
+		Provider:         "https://issuer.example",
+		ClientID:         "client",
+		ClientSecret:     "secret",
+		ForceHTTPSCookie: &forceFalse,
+		CookieDomain:     "",
+		CookiePath:       "/",
+		CookieTTL:        caddyDuration(30 * time.Minute),
+		RefreshLeeway:    caddyDuration(0),
 	}
 	h.applyDefaults()
 	if err := h.initCookieCodecs(); err != nil {

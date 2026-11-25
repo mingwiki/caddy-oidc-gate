@@ -7,7 +7,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
-	"net/url"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -69,19 +68,5 @@ func generatePKCE() (verifier, challenge string, err error) {
 }
 
 func (h *Handler) getCallbackURL(r *http.Request) string {
-	scheme := "http"
-	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
-		scheme = "https"
-	}
-	host := r.Host
-	if fwdHost := r.Header.Get("X-Forwarded-Host"); fwdHost != "" {
-		host = fwdHost
-	}
-
-	u := url.URL{
-		Scheme: scheme,
-		Host:   host,
-		Path:   "/auth/callback",
-	}
-	return u.String()
+	return h.getAbsoluteRedirectURL(r, "/auth/callback")
 }
