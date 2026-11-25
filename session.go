@@ -34,7 +34,7 @@ type sessionData struct {
 	ExpiresAt    time.Time
 }
 
-func (h Handler) flowStateCookieName() string {
+func (h *Handler) flowStateCookieName() string {
 	return h.CookieName + flowCookieSuffix
 }
 
@@ -73,14 +73,14 @@ func deriveCookieKeys(clientSecret string, clientID string, provider string) ([]
 	return hashKey, blockKey, nil
 }
 
-func (h Handler) cookieSecure(r *http.Request) bool {
+func (h *Handler) cookieSecure(r *http.Request) bool {
 	if h.ForceHTTPSCookie != nil && *h.ForceHTTPSCookie {
 		return true
 	}
 	return r.TLS != nil
 }
 
-func (h Handler) makeCookie(r *http.Request, name string, value string, ttl time.Duration) *http.Cookie {
+func (h *Handler) makeCookie(r *http.Request, name string, value string, ttl time.Duration) *http.Cookie {
 	c := &http.Cookie{
 		Name:     name,
 		Value:    value,
@@ -99,14 +99,14 @@ func (h Handler) makeCookie(r *http.Request, name string, value string, ttl time
 	return c
 }
 
-func (h Handler) makeClearCookie(r *http.Request, name string) *http.Cookie {
+func (h *Handler) makeClearCookie(r *http.Request, name string) *http.Cookie {
 	c := h.makeCookie(r, name, "", 0)
 	c.MaxAge = -1
 	c.Expires = time.Unix(0, 0).UTC()
 	return c
 }
 
-func (h Handler) setFlowStateCookie(w http.ResponseWriter, r *http.Request, state flowState) error {
+func (h *Handler) setFlowStateCookie(w http.ResponseWriter, r *http.Request, state flowState) error {
 	if h.flowCodec == nil {
 		return errors.New("auth_oidc: flow codec not initialized")
 	}
@@ -119,7 +119,7 @@ func (h Handler) setFlowStateCookie(w http.ResponseWriter, r *http.Request, stat
 	return nil
 }
 
-func (h Handler) readFlowStateCookie(r *http.Request) (flowState, error) {
+func (h *Handler) readFlowStateCookie(r *http.Request) (flowState, error) {
 	name := h.flowStateCookieName()
 	c, err := r.Cookie(name)
 	if err != nil {
@@ -140,11 +140,11 @@ func (h Handler) readFlowStateCookie(r *http.Request) (flowState, error) {
 	return out, nil
 }
 
-func (h Handler) clearFlowStateCookie(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) clearFlowStateCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, h.makeClearCookie(r, h.flowStateCookieName()))
 }
 
-func (h Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, sess sessionData) error {
+func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, sess sessionData) error {
 	if h.sessionCodec == nil {
 		return errors.New("auth_oidc: session codec not initialized")
 	}
@@ -157,7 +157,7 @@ func (h Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, sess s
 	return nil
 }
 
-func (h Handler) readSessionCookie(r *http.Request) (sessionData, error) {
+func (h *Handler) readSessionCookie(r *http.Request) (sessionData, error) {
 	c, err := r.Cookie(h.CookieName)
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
@@ -180,7 +180,7 @@ func (h Handler) readSessionCookie(r *http.Request) (sessionData, error) {
 	return out, nil
 }
 
-func (h Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, h.makeClearCookie(r, h.CookieName))
 }
 

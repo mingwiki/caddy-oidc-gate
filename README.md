@@ -144,6 +144,9 @@ The plugin automatically handles the following routes on the protected site:
 - `/auth/callback`: Handles the OIDC callback.
 - `/auth/logout`: Clears the local session and optionally redirects to the provider's end-session endpoint.
 
+Provider discovery is lazy: if the provider is unreachable at startup, Caddy still starts and
+protected sites answer `503 Service Unavailable`, retrying discovery at most every 30 seconds.
+
 ## Chicken-and-Egg: Caddy Proxying Its Own OIDC Provider
 
 When Caddy reverse-proxies the OIDC provider (e.g. `id.example.com` proxies to `localhost:1411`),

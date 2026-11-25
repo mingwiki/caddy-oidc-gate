@@ -12,7 +12,7 @@ import (
 )
 
 func TestFlowStateCookie_RoundTripAndAttributes(t *testing.T) {
-	h := Handler{
+	h := &Handler{
 		Provider:     "https://issuer.example",
 		ClientID:     "client",
 		ClientSecret: "secret",
@@ -78,7 +78,7 @@ func TestFlowStateCookie_RoundTripAndAttributes(t *testing.T) {
 }
 
 func TestFlowStateCookie_TTLExpiry(t *testing.T) {
-	h := Handler{
+	h := &Handler{
 		Provider:     "https://issuer.example",
 		ClientID:     "client",
 		ClientSecret: "secret",
@@ -112,7 +112,7 @@ func TestFlowStateCookie_TTLExpiry(t *testing.T) {
 
 func TestSessionCookie_RoundTripAndSecureOverride(t *testing.T) {
 	forceFalse := false
-	h := Handler{
+	h := &Handler{
 		Provider:         "https://issuer.example",
 		ClientID:         "client",
 		ClientSecret:     "secret",
@@ -158,7 +158,7 @@ func TestSessionCookie_RoundTripAndSecureOverride(t *testing.T) {
 }
 
 func TestClearCookies(t *testing.T) {
-	h := Handler{
+	h := &Handler{
 		Provider:     "https://issuer.example",
 		ClientID:     "client",
 		ClientSecret: "secret",

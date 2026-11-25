@@ -28,6 +28,7 @@ type idp struct {
 	keyID string
 
 	mu           sync.Mutex
+	down         bool
 	nonce        string
 	failRefresh  bool
 	refreshCalls int
@@ -54,7 +55,16 @@ func newIdP(t *testing.T) *idp {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/token", p.serveToken)
-	mux.Handle("/", oidcSrv)
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p.mu.Lock()
+		down := p.down
+		p.mu.Unlock()
+		if down {
+			http.Error(w, "provider down", http.StatusServiceUnavailable)
+			return
+		}
+		oidcSrv.ServeHTTP(w, r)
+	}))
 	p.srv = httptest.NewServer(mux)
 	t.Cleanup(p.srv.Close)
 	oidcSrv.SetIssuer(p.srv.URL)
@@ -80,7 +90,7 @@ func (p *idp) serveToken(w http.ResponseWriter, r *http.Request) {
 	if refresh && fail {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		fmt.Fprint(w, `{"error":"invalid_grant"}`)
+		_, _ = fmt.Fprint(w, `{"error":"invalid_grant"}`)
 		return
 	}
 
@@ -102,6 +112,12 @@ func (p *idp) sign(nonce string) string {
 	return oidctest.SignIDToken(p.key, p.keyID, oidc.ES256, claims)
 }
 
+func (p *idp) setDown(down bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.down = down
+}
+
 func (p *idp) setNonce(nonce string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -120,7 +136,9 @@ func (p *idp) stats() (refreshCalls int, form url.Values) {
 	return p.refreshCalls, p.lastForm
 }
 
-func newTestHandler(t *testing.T, provider *idp) *Handler {
+// newHandler builds a provisioned-enough handler (defaults + cookie codecs) but
+// talks to no provider, so tests can drive provider discovery themselves.
+func newHandler(t *testing.T, provider *idp) *Handler {
 	t.Helper()
 
 	forceHTTPS := false
@@ -138,6 +156,13 @@ func newTestHandler(t *testing.T, provider *idp) *Handler {
 	if err := h.initCookieCodecs(); err != nil {
 		t.Fatalf("initCookieCodecs: %v", err)
 	}
+	return h
+}
+
+func newTestHandler(t *testing.T, provider *idp) *Handler {
+	t.Helper()
+
+	h := newHandler(t, provider)
 	if err := h.initOIDC(context.Background()); err != nil {
 		t.Fatalf("initOIDC: %v", err)
 	}
@@ -481,5 +506,30 @@ func TestLogoutClearsSessionAndBlocksCrossSite(t *testing.T) {
 	}
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("cross-site logout status = %d, want 403", w.Code)
+	}
+}
+
+func TestServeHTTP_ProviderOutageReturns503ThenRecovers(t *testing.T) {
+	provider := newIdP(t)
+	h := newHandler(t, provider)
+	provider.setDown(true)
+
+	w := serve(h, httptest.NewRequest(http.MethodGet, "http://app.example.com/private", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status with provider down = %d, want 503", w.Code)
+	}
+
+	// Recovered provider: the next attempt (after the retry window) must succeed.
+	provider.setDown(false)
+	h.mu.Lock()
+	h.lastInitTried = time.Time{}
+	h.mu.Unlock()
+
+	w = serve(h, httptest.NewRequest(http.MethodGet, "http://app.example.com/private", nil))
+	if w.Code != http.StatusFound {
+		t.Fatalf("status after recovery = %d, want 302 (body %q)", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Location") != "/auth/login?return_to=%2Fprivate" {
+		t.Fatalf("Location = %q", w.Header().Get("Location"))
 	}
 }

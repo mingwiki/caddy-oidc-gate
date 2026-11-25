@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
@@ -17,7 +18,7 @@ import (
 )
 
 func init() {
-	caddy.RegisterModule(Handler{})
+	caddy.RegisterModule(&Handler{})
 }
 
 type Handler struct {
@@ -53,12 +54,18 @@ type Handler struct {
 	flowCodec    *securecookie.SecureCookie
 	sessionCodec *securecookie.SecureCookie
 
+	// mu guards the provider fields, which are initialised lazily so Caddy can
+	// start while the provider is unreachable.
+	mu            sync.Mutex
+	lastInitErr   error
+	lastInitTried time.Time
+
 	provider     *oidc.Provider
 	verifier     *oidc.IDTokenVerifier
 	oauth2Config oauth2.Config
 }
 
-func (Handler) CaddyModule() caddy.ModuleInfo {
+func (*Handler) CaddyModule() caddy.ModuleInfo {
 	return caddy.ModuleInfo{
 		ID:  "http.handlers.auth_oidc",
 		New: func() caddy.Module { return new(Handler) },
@@ -74,14 +81,22 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if err := h.initCookieCodecs(); err != nil {
 		return err
 	}
-	return h.initOIDC(ctx.Context)
+	// Best effort: an unreachable provider must not stop Caddy from loading.
+	// ServeHTTP retries and answers 503 until discovery succeeds.
+	_ = h.ensureOIDC(ctx.Context)
+	return nil
 }
 
-func (h Handler) Validate() error {
+func (h *Handler) Validate() error {
 	return h.validate()
 }
 
-func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	if err := h.ensureOIDC(r.Context()); err != nil {
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		return nil
+	}
+
 	switch r.URL.Path {
 	case "/auth/login":
 		return h.serveLogin(w, r)
@@ -104,6 +119,36 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 	q.Set("return_to", r.URL.RequestURI())
 	loginURL.RawQuery = q.Encode()
 	http.Redirect(w, r, loginURL.String(), http.StatusFound)
+	return nil
+}
+
+const providerRetryInterval = 30 * time.Second
+
+// ensureOIDC initialises the OIDC provider on first use. Failed attempts are
+// retried at most once per providerRetryInterval so a provider outage costs one
+// failing discovery call per window instead of one per request.
+func (h *Handler) ensureOIDC(ctx context.Context) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.verifier != nil {
+		return nil
+	}
+	if h.lastInitErr != nil && time.Since(h.lastInitTried) < providerRetryInterval {
+		return h.lastInitErr
+	}
+	if h.logger == nil {
+		return errors.New("auth_oidc: handler not provisioned")
+	}
+
+	h.lastInitTried = time.Now()
+	if err := h.initOIDC(ctx); err != nil {
+		h.lastInitErr = err
+		h.logger.Error("oidc provider unavailable, retrying later", zap.Error(err))
+		return err
+	}
+	h.lastInitErr = nil
+	h.logger.Info("oidc provider ready", zap.String("discovery_url", h.Provider))
 	return nil
 }
 
@@ -173,7 +218,7 @@ func (h *Handler) refresh(r *http.Request, sess sessionData) (sessionData, error
 
 // stripAuthHeaders removes client-supplied headers with the configured prefix
 // so upstream apps can trust injected identity headers.
-func (h Handler) stripAuthHeaders(r *http.Request) {
+func (h *Handler) stripAuthHeaders(r *http.Request) {
 	prefix := http.CanonicalHeaderKey(h.HeaderPrefix)
 	if prefix == "" {
 		return
@@ -188,8 +233,8 @@ func (h Handler) stripAuthHeaders(r *http.Request) {
 // injectHeaders adds the verified claims to the request. It reports whether the
 // claims could be decoded; on failure the session is cleared so the caller
 // redirects to login instead of forwarding an unauthenticated request.
-func (h Handler) injectHeaders(w http.ResponseWriter, r *http.Request, idToken *oidc.IDToken) bool {
-	var claims map[string]interface{}
+func (h *Handler) injectHeaders(w http.ResponseWriter, r *http.Request, idToken *oidc.IDToken) bool {
+	claims := map[string]interface{}{}
 	if err := idToken.Claims(&claims); err != nil {
 		h.logger.Warn("failed to decode session id token claims, clearing session", zap.Error(err))
 		h.clearSessionCookie(w, r)

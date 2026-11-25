@@ -7,7 +7,7 @@ import (
 )
 
 func TestGetAbsoluteRedirectURL(t *testing.T) {
-	h := Handler{}
+	h := &Handler{}
 
 	tests := []struct {
 		name     string
@@ -87,7 +87,7 @@ func TestStripAuthHeaders(t *testing.T) {
 	r.Header.Set("X-Auth-Email", "spoofed@example.com")
 	r.Header.Set("X-Other", "keep")
 
-	Handler{HeaderPrefix: "X-Auth-"}.stripAuthHeaders(r)
+	(&Handler{HeaderPrefix: "X-Auth-"}).stripAuthHeaders(r)
 
 	if got := r.Header.Get("X-Auth-Email"); got != "" {
 		t.Fatalf("spoofed X-Auth-Email not stripped: %q", got)

@@ -12,7 +12,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
-func (h Handler) serveLogin(w http.ResponseWriter, r *http.Request) error {
+func (h *Handler) serveLogin(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Cache-Control", "no-store")
 
 	returnTo := r.URL.Query().Get("return_to")
@@ -70,7 +70,7 @@ func (h Handler) serveLogin(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (h Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
+func (h *Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Cache-Control", "no-store")
 
 	fs, err := h.readFlowStateCookie(r)
@@ -157,7 +157,7 @@ func (h Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-func (h Handler) serveLogout(w http.ResponseWriter, r *http.Request) error {
+func (h *Handler) serveLogout(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("Cache-Control", "no-store")
 
 	// Logout is a state change reachable via top-level GET navigation, so refuse
@@ -217,7 +217,7 @@ func isLocalPath(p string) bool {
 		!strings.ContainsAny(p, "\r\n")
 }
 
-func (h Handler) getAbsoluteRedirectURL(r *http.Request, target string) string {
+func (h *Handler) getAbsoluteRedirectURL(r *http.Request, target string) string {
 	u, err := url.Parse(target)
 	if err != nil {
 		return ""

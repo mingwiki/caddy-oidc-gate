@@ -34,11 +34,9 @@ func (h *Handler) initOIDC(ctx context.Context) error {
 		return fmt.Errorf("auth_oidc: failed to discover provider: %w", err)
 	}
 	h.provider = provider
-
 	h.verifier = provider.Verifier(&oidc.Config{
 		ClientID: h.ClientID,
 	})
-
 	h.oauth2Config = oauth2.Config{
 		ClientID:     h.ClientID,
 		ClientSecret: h.ClientSecret,

@@ -52,7 +52,7 @@ func (h *Handler) applyDefaults() {
 	}
 }
 
-func (h Handler) validate() error {
+func (h *Handler) validate() error {
 	if strings.TrimSpace(h.Provider) == "" {
 		return errors.New("provider is required")
 	}
