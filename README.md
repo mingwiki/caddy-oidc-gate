@@ -1,102 +1,144 @@
-# Caddy Auth OIDC Plugin
+# caddy-auth-oidc
 
-A modern, minimal, and native Caddy v2 authentication plugin for generic OIDC providers (e.g. Pocket ID, Keycloak, Authentik).
-It replaces the need for external auth proxies like `oauth2-proxy` in simple homelab SSO setups.
+OIDC login for Caddy-served sites, as a native Caddy v2 handler. No extra container, no
+auth proxy, one cookie per site (or per domain for SSO).
 
-## Features
+Built for homelabs where Pocket ID (or Keycloak, Authentik, Authelia, Zitadel…) is already the
+identity provider and `oauth2-proxy` feels like a second project to operate.
 
-- **Native Caddy HTTP Middleware:** Integrates directly into Caddy.
-- **Generic OIDC Support:** Works with any standard OpenID Connect provider.
-- **Encrypted Session Cookies:** Uses `gorilla/securecookie` to encrypt and sign session data.
-- **PKCE Support:** Modern OAuth2 authorization code flow with PKCE and state/nonce validation.
-- **Multi-Domain SSO:** Optionally share authentication state across multiple subdomains.
-- **Token Refresh:** Automatically refreshes the session near expiry.
-- **Header Injection:** Optionally pass user claims upstream.
-- **Issuer URL Override:** Supports discovery via a local backend while validating against the external issuer URL — solves chicken-and-egg when Caddy reverse-proxies its own OIDC provider.
-
-## Getting Started
-
-### Building with `xcaddy`
-
-The easiest way to build Caddy with this plugin is using `xcaddy`:
-
-```bash
-xcaddy build \
-    --with github.com/mingwiki/caddy-auth-oidc
+```caddyfile
+example.com {
+    auth_oidc {
+        provider      https://id.example.com
+        client_id     my-client
+        client_secret {env.OIDC_CLIENT_SECRET}
+    }
+    reverse_proxy localhost:8080
+}
 ```
 
-### Including Additional Plugins
+---
 
-```bash
-xcaddy build \
-    --with github.com/mingwiki/caddy-auth-oidc \
-    --with github.com/mholt/caddy-webdav
+## Project status
+
+Early, single-maintainer, used in production on my own homelab. The session cookie format and
+the `auth_oidc` option names are stable as of now, but this is a small project with no
+compatibility guarantees across majors. Read [Scope](#scope-what-this-plugin-does-and-does-not-do)
+before deploying it somewhere that matters.
+
+## Scope: what this plugin does and does not do
+
+### What it does
+
+- Gates a Caddy site behind an OIDC login (authorization code flow with PKCE).
+- Keeps the login in an encrypted, signed cookie — no server-side session store, no Redis,
+  nothing to back up.
+- Shares that session across subdomains (`cookie_domain`) so users log in once for
+  `app1.example.com`, `app2.example.com`, …
+- Optionally passes verified claims upstream as headers (`X-Auth-Email`, …) for apps that can
+  consume them.
+- Renews the session in the background when the provider hands out refresh tokens.
+- Survives provider restarts without taking Caddy down (sites answer `503` for the outage
+  window instead of the whole config failing to load).
+
+### What it does not do
+
+- **Authorize.** There is no user allow-list, no group/role check, no per-path ACL. Whoever the
+  provider authenticates gets in. Deciding *who* may log in is the provider's job (Pocket ID
+  users/groups) or the upstream app's job.
+- **Forward tokens.** No `Authorization` header, no access token, no ID token passed upstream —
+  only the four identity headers below. Apps needing to call APIs on behalf of the user are out
+  of scope.
+- **Forward arbitrary claims.** Injected headers are exactly: `X-Auth-Subject`, `X-Auth-Email`,
+  `X-Auth-Name` (`name`, falling back to `preferred_username`), `X-Auth-Issuer`. `groups`,
+  `roles`, custom claims: not forwarded (yet).
+- **Serve APIs.** Cookie-based browser sessions only. No bearer-token validation, no
+  machine-to-machine.
+- **Support multiple providers** in one site, or per-user routing between providers.
+- **Manage users.** No signup, no password reset, no profile — that is the provider's UI.
+
+If you need claim-based authorization or token pass-through, use a proxy that does that
+(`oauth2-proxy`, `caddy-security`) — this plugin deliberately stays out of it.
+
+---
+
+## How a login works
+
+```text
+browser ──GET /private──▶ Caddy (auth_oidc)
+                          │ no valid cookie
+                          └─302 /auth/login?return_to=/private
+       ──GET /auth/login──▶ generate state + nonce + PKCE verifier
+                          │ store them in encrypted *_flow cookie (10m)
+                          └─302 to provider /authorize (code_challenge=S256)
+       ──passkey etc.────▶ provider
+                          └─302 /auth/callback?code=…&state=…
+       ──GET /auth/callback▶ state compare (constant time) → code exchange with code_verifier
+                          │ verify ID token (JWKS, iss, aud, exp) → compare nonce
+                          │ store ID token + refresh token + expiry in session cookie
+                          └─302 back to return_to (same-origin paths only)
+       ──GET /private─────▶ cookie decrypts & verifies → (refresh if near expiry)
+                          │ inject identity headers if enabled
+                          └─▶ upstream
 ```
 
-### Docker Build Example
+- `return_to` is forced to a same-origin path (`//evil.com`, `/\evil.com` are rejected), so the
+  login endpoint cannot be used as an open redirect.
+- Client-supplied headers with `header_prefix` are **stripped** on every request before
+  injection, so upstream apps can trust `X-Auth-*` blindly.
+- The session cookie is `HttpOnly`, `Secure` (by default), `SameSite=Lax`, encrypted and signed
+  with keys derived (HKDF-SHA256) from `client_secret` + `client_id` + `provider`.
+- Logout clears the local cookie and, if the provider advertises `end_session_endpoint`, also
+  ends the provider session (`id_token_hint` included). Cross-site logout requests are refused.
+- If the provider is unreachable, discovery is retried at most every 30s and protected sites
+  return `503` meanwhile.
 
-```dockerfile
-FROM caddy:2-builder AS builder
+---
 
-RUN xcaddy build \
-    --with github.com/mingwiki/caddy-auth-oidc
+## Quick start with Pocket ID
 
-FROM caddy:2
+Pocket ID is a passkey-only OIDC provider — a good match for this plugin: no passwords to
+phish, one client per trust domain, and it advertises `end_session_endpoint` so logout really
+logs you out.
 
-COPY --from=builder /usr/bin/caddy /usr/bin/caddy
-```
+### 1. Create the client in Pocket ID
 
-## Caddyfile Configuration
+1. Pocket ID → **Admin → OIDC Clients → Create**.
+2. Name: whatever you recognize (`caddy-homelab`).
+3. Callback URLs — one per protected host, exactly matching what Caddy will send:
+   - `https://app1.example.com/auth/callback`
+   - `https://app2.example.com/auth/callback`
+   
+   No wildcards: the plugin sends `redirect_uri` built from the request scheme and host, and
+   the provider validates it against this list.
+4. Copy the **Client ID** and **Client Secret**.
 
-### Important: Handler Order
+Pocket ID's issuer is its own external URL (`APP_URL`) — remember it, it goes into
+`issuer_url` below if Caddy also proxies Pocket ID.
 
-The `auth_oidc` handler must run **before** `reverse_proxy` to intercept unauthenticated requests.
-Add a global `order` directive:
+### 2. Point Caddy at it
+
+If Caddy proxies Pocket ID itself (typical homelab: `id.example.com` → `127.0.0.1:1411`), do
+**not** discover through the public URL — Caddy is not listening yet while loading its config.
+Use the local backend for discovery and the public URL as issuer:
 
 ```caddyfile
 {
     order auth_oidc before reverse_proxy
-}
-```
-
-### Simple Single-Site
-
-```caddyfile
-{
-    order auth_oidc before reverse_proxy
-}
-
-auth_oidc {
-    provider https://id.example.com
-    client_id my_client
-    client_secret my_secret
-}
-
-reverse_proxy localhost:8080
-```
-
-### Advanced Multi-Subdomain SSO
-
-This configuration shares a single OIDC client and session cookie across multiple sites:
-
-```caddyfile
-{
-    order auth_oidc before reverse_proxy
-    order webdav before file_server
 }
 
 (auth) {
     auth_oidc {
-        provider http://localhost:1411
-        issuer_url https://id.example.com
-        client_id my_client
-        client_secret my_secret
+        provider      http://127.0.0.1:1411
+        issuer_url    https://id.example.com
+        client_id     {env.OIDC_CLIENT_ID}
+        client_secret {env.OIDC_CLIENT_SECRET}
 
-        cookie_domain .example.com
-        scopes openid profile email
+        cookie_domain .example.com      # one login for every subdomain
+        scopes        openid profile email
 
         inject_headers true
-        header_prefix X-Auth-
+        header_prefix  X-Auth-
     }
 }
 
@@ -110,106 +152,160 @@ app2.example.com {
     reverse_proxy localhost:8082
 }
 
-# The OIDC provider itself — reverse-proxied by Caddy
 id.example.com {
-    reverse_proxy http://localhost:1411
+    reverse_proxy 127.0.0.1:1411
 }
 ```
 
-## Configuration Reference
+`scopes` must contain `openid` — the config is rejected otherwise.
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `provider` | OIDC discovery URL (required) | |
-| `issuer_url` | Override the issuer URL for token validation; use when provider discovery URL differs from the issuer in metadata | *same as `provider`* |
-| `client_id` | OAuth2 Client ID (required) | |
-| `client_secret` | OAuth2 Client Secret (required) | |
-| `scopes` | OAuth2 scopes | `openid profile email` |
-| `cookie_domain` | Domain for the session cookie | *none* |
-| `cookie_name` | Name of the session cookie | `caddy_auth_oidc` |
-| `cookie_path` | Path for the session cookie | `/` |
-| `cookie_ttl` | Duration the session cookie is valid | `168h` (7 days) |
-| `state_ttl` | Duration the flow state cookie is valid | `10m` |
-| `inject_headers` | Inject user claims as headers upstream | `false` |
-| `header_prefix` | Prefix for injected headers | `X-Auth-` |
-| `logout_redirect` | URL to redirect to after logout | `/` |
-| `refresh_leeway` | Time before expiry to attempt token refresh | `2m` |
-| `force_https_cookie` | Force the `Secure` flag on cookies | `true` |
-
-## Endpoints
-
-The plugin automatically handles the following routes on the protected site:
-
-- `/auth/login`: Initiates the OIDC flow.
-- `/auth/callback`: Handles the OIDC callback.
-- `/auth/logout`: Clears the local session and optionally redirects to the provider's end-session endpoint.
-
-Provider discovery is lazy: if the provider is unreachable at startup, Caddy still starts and
-protected sites answer `503 Service Unavailable`, retrying discovery at most every 30 seconds.
-
-## Chicken-and-Egg: Caddy Proxying Its Own OIDC Provider
-
-When Caddy reverse-proxies the OIDC provider (e.g. `id.example.com` proxies to `localhost:1411`),
-the `auth_oidc` plugin cannot discover the provider via the external URL at startup — Caddy
-isn't listening yet. This creates a startup deadlock.
-
-**Solution:** Use `provider` pointing to the local backend for discovery, and `issuer_url`
-pointing to the external URL for token validation:
-
-```caddyfile
-auth_oidc {
-    provider http://localhost:1411
-    issuer_url https://id.example.com:8443
-    client_id my_client
-    client_secret my_secret
-}
-```
-
-The plugin uses `oidc.InsecureIssuerURLContext` to allow the discovery URL and issuer URL
-to differ.
-
-## Security Considerations & Hardening
-
-- **Use HTTPS:** Run Caddy with HTTPS enabled. The plugin defaults to forcing the `Secure` flag on cookies.
-- **Provider Configuration:** Ensure the OIDC provider is configured to accept callback URLs for *all* subdomains using the plugin (e.g. `https://app1.example.com/auth/callback`, `https://app2.example.com/auth/callback`).
-- **Cookie Domain:** Keep the `cookie_domain` as narrow as possible. Use a leading dot (e.g. `.example.com`) to cover subdomains.
-- **Reverse Proxies:** If running Caddy behind another reverse proxy, ensure `trusted_proxies` is configured correctly so Caddy knows the original protocol and host.
-- **Authorization:** The plugin only authenticates users; who may log in is decided by the OIDC provider (e.g. Pocket ID users/groups).
-- **Identity Headers:** Client-supplied headers with `header_prefix` are stripped before the verified claims are injected, so upstream apps can trust them.
-- **Secrets:** Treat the `client_secret` with care. The plugin uses it to derive encryption and signing keys for the session cookie. Rotating the `client_secret` will invalidate all active sessions.
-
-## Development Guide
-
-If you want to modify this plugin or build it from local source code, follow these steps:
-
-### Prerequisites
-
-- Go 1.25 or higher
-- [xcaddy](https://github.com/caddyserver/xcaddy) installed (`go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest`)
-
-### Running Tests
-
-The project includes unit tests for session codecs and redirect URL validation.
+### 3. Verify
 
 ```bash
-go test -v ./...
+curl -sI https://app1.example.com/ | grep -i location
+# location: https://app1.example.com/auth/login?return_to=%2F
+
+curl -sI https://app1.example.com/auth/login | grep -i location
+# location: https://id.example.com/authorize?client_id=…&code_challenge=…&code_challenge_method=S256&nonce=…&state=…
 ```
 
-### Building for Local Testing
+Then open the site in a browser: passkey prompt → back to the app. Append `-v` to the curl
+calls if you want to see PKCE and the state cookie.
 
-To test your local changes, use `xcaddy` and replace the module path with your local directory:
+### Pocket ID specifics worth knowing
+
+| Topic | Behaviour |
+| --- | --- |
+| Logout | Pocket ID advertises `end_session_endpoint`, so `/auth/logout` kills the SSO session too. Next login asks for the passkey again. |
+| Claims | Pocket ID sends `sub`, `email`, `name`/`preferred_username` → that is exactly what lands in `X-Auth-*`. It does not give this plugin `groups`. |
+| Refresh | With a refresh token issued, sessions renew silently up to `cookie_ttl`. Without one, every ID-token expiry costs one invisible round trip through Pocket ID (still logged in there → no prompt). |
+| Secret rotation | The cookie keys are derived from `client_secret`. Rotating it in Pocket ID invalidates all sessions — everyone logs in again. |
+| Outage | Stop Pocket ID and protected sites return `503`, not a login loop. Caddy keeps serving unauthenticated paths and other sites. |
+| Passkeys only | There is no fallback password. Lose the device, use Pocket ID's recovery flow; this plugin has no say in it. |
+
+---
+
+## Build
+
+```bash
+xcaddy build --with github.com/mingwiki/caddy-auth-oidc
+```
+
+With extra plugins (e.g. WebDAV, DNS challenge):
 
 ```bash
 xcaddy build \
-    --with github.com/mingwiki/caddy-auth-oidc=./
+    --with github.com/mingwiki/caddy-auth-oidc \
+    --with github.com/mholt/caddy-webdav \
+    --with github.com/caddy-dns/alidns
 ```
 
-This will produce a `caddy` executable in your current directory with your local plugin modifications compiled in.
+Docker:
 
-### Running the Local Build
+```dockerfile
+FROM caddy:2-builder AS builder
+RUN xcaddy build --with github.com/mingwiki/caddy-auth-oidc
 
-Create a `Caddyfile` for testing and run the newly built binary:
+FROM caddy:2
+COPY --from=builder /usr/bin/caddy /usr/bin/caddy
+```
+
+### Handler order
+
+`auth_oidc` must run before whatever it protects:
+
+```caddyfile
+{
+    order auth_oidc before reverse_proxy
+}
+```
+
+For `file_server`/`webdav` sites, order it before those too
+(`order auth_oidc before file_server webdav`).
+
+---
+
+## Configuration
+
+| Option | Description | Default |
+| --- | --- | --- |
+| `provider` | Discovery base URL (`/.well-known/openid-configuration` is appended). Required. | |
+| `issuer_url` | Expected `iss` — set it when discovery goes through a different URL than the public issuer | same as `provider` |
+| `client_id` | OIDC client ID. Required. | |
+| `client_secret` | OIDC client secret. Required; also derives the cookie keys. | |
+| `scopes` | Must include `openid` | `openid profile email` |
+| `cookie_domain` | Cookie domain; set it to share one session across subdomains | host-only |
+| `cookie_name` | Session cookie name | `caddy_auth_oidc` |
+| `cookie_path` | Cookie path | `/` |
+| `cookie_ttl` | Local session lifetime | `168h` |
+| `state_ttl` | Lifetime of the in-flight login cookie | `10m` |
+| `inject_headers` | Inject identity headers upstream | `false` |
+| `header_prefix` | Prefix for injected headers | `X-Auth-` |
+| `logout_redirect` | Where to go after logout | `/` |
+| `refresh_leeway` | How early before expiry to refresh | `2m` |
+| `force_https_cookie` | Force `Secure` on cookies (needed behind a TLS-terminating proxy that Caddy does not see) | `true` |
+
+## Endpoints
+
+Reserved on every protected site (they sit in front of your upstream, at the site root):
+
+| Path | Purpose |
+| --- | --- |
+| `/auth/login` | Starts the flow. Skips straight to `return_to` if the session is already valid. |
+| `/auth/callback` | Code exchange, token verification, session cookie. |
+| `/auth/logout` | Clears the local cookie, then the provider session if advertised. |
+
+Paths are fixed; the plugin cannot be mounted under a subpath. If an upstream app needs
+`/auth/*` for itself, it will not get those three paths.
+
+---
+
+## Development
 
 ```bash
+go test -race -cover ./...        # unit + end-to-end tests against a fake OIDC provider
+go vet ./...
+staticcheck ./...                 # optional
+golangci-lint run                 # optional
+```
+
+Build against local sources:
+
+```bash
+xcaddy build --with github.com/mingwiki/caddy-auth-oidc=./
 ./caddy run --config Caddyfile
 ```
+
+Layout: `config.go` (defaults/validation), `caddyfile.go` (Caddyfile parsing), `oidc.go`
+(discovery, PKCE, URL building), `session.go` (cookie codec), `endpoints.go`
+(login/callback/logout), `handler.go` (middleware, session refresh, header injection).
+
+## Security notes
+
+- Everything rides on TLS and on `client_secret` staying secret: it is the HKDF input for the
+  cookie keys. Leak it and cookies are forgeable; rotate it and sessions die.
+- The session cookie is the credential. `cookie_ttl` is how long a stolen browser keeps access —
+  shorten it and rely on refresh, or accept 7 days.
+- Behind another reverse proxy, configure Caddy's `trusted_proxies`; the plugin takes the
+  `redirect_uri` host and scheme from the request (`X-Forwarded-*`). The provider's callback
+  whitelist is the backstop.
+- `inject_headers` makes `X-Auth-*` an authentication boundary for the upstream app: keep the
+  upstream off the public internet, or it will believe any client that can reach it directly.
+- Who may log in is the provider's decision. This plugin never had an allow-list and will not
+  grow one.
+
+## Troubleshooting
+
+| Symptom | Likely cause |
+| --- | --- |
+| `503 Service Unavailable` on protected sites | Discovery failed — check `provider` reachability and Caddy logs (`oidc provider unavailable`); it retries every 30s |
+| Login loops forever | Session cookie never stored: `cookie_domain` too broad/narrow, `Secure` cookie over plain HTTP, or an upstream rewriting `Set-Cookie` |
+| `401 Unauthorized` right after the provider redirect | `state` cookie missing/expired (`state_ttl`), clock skew on `exp`, or wrong `issuer_url` (token `iss` mismatch) |
+| Login works, app sees no user | `inject_headers` not enabled, or the app reads different header names than `header_prefix` |
+| Everyone logged out after a provider change | `client_secret` rotated → cookie keys changed |
+| `state mismatch` in logs | Two tabs racing the same flow, or a stale flow cookie (>10m between login and callback) |
+
+## License
+
+No license file yet — treat it as all rights reserved until one is added (MIT or Apache-2.0
+would fit this project). Open an issue if you need it for downstream use.
