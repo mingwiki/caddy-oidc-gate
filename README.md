@@ -307,5 +307,4 @@ Layout: `config.go` (defaults/validation), `caddyfile.go` (Caddyfile parsing), `
 
 ## License
 
-No license file yet — treat it as all rights reserved until one is added (MIT or Apache-2.0
-would fit this project). Open an issue if you need it for downstream use.
+MIT — see [LICENSE](LICENSE).
