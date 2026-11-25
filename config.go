@@ -17,6 +17,8 @@ const (
 	defaultHeaderPrefix   = "X-Auth-"
 	defaultLogoutRedirect = "/"
 	defaultRefreshLeeway  = caddy.Duration(2 * time.Minute)
+	defaultPathPrefix     = "/auth"
+	defaultGroupsClaim    = "groups"
 )
 
 var defaultScopes = []string{"openid", "profile", "email"}
@@ -42,6 +44,22 @@ func (h *Handler) applyDefaults() {
 	}
 	if h.LogoutRedirect == "" {
 		h.LogoutRedirect = defaultLogoutRedirect
+	}
+	if strings.TrimSpace(h.PathPrefix) == "" {
+		h.PathPrefix = defaultPathPrefix
+	}
+	h.PathPrefix = strings.TrimSuffix(h.PathPrefix, "/")
+	if strings.TrimSpace(h.GroupsClaim) == "" {
+		h.GroupsClaim = defaultGroupsClaim
+	}
+	if h.AllowedGroups != nil {
+		groups := make([]string, 0, len(h.AllowedGroups))
+		for _, g := range h.AllowedGroups {
+			if g = strings.TrimSpace(g); g != "" {
+				groups = append(groups, g)
+			}
+		}
+		h.AllowedGroups = groups
 	}
 	if h.RefreshLeeway == 0 {
 		h.RefreshLeeway = defaultRefreshLeeway
@@ -76,6 +94,12 @@ func (h *Handler) validate() error {
 	}
 	if h.RefreshLeeway < 0 {
 		return errors.New("refresh_leeway must be non-negative")
+	}
+	if !strings.HasPrefix(h.PathPrefix, "/") || strings.ContainsAny(h.PathPrefix, " \t") {
+		return errors.New("path_prefix must be an absolute path without spaces, e.g. /auth")
+	}
+	if strings.ContainsAny(h.GroupsClaim, " \t\r\n") {
+		return errors.New("groups_claim must not contain whitespace")
 	}
 	return nil
 }

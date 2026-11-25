@@ -21,20 +21,27 @@ func init() {
 	caddy.RegisterModule(&Handler{})
 }
 
-// Fixed auth paths. They are the only routing knowledge in the plugin: the
-// middleware dispatch, the login redirect and the callback redirect_uri all
-// read them from here.
+// Fixed auth actions, appended to path_prefix. They are the only routing
+// knowledge in the plugin: dispatch, the login redirect and the callback
+// redirect_uri all read them from here.
 const (
-	pathAuthPrefix = "/auth/"
-	pathLogin      = pathAuthPrefix + "login"
-	pathCallback   = pathAuthPrefix + "callback"
-	pathLogout     = pathAuthPrefix + "logout"
+	actionLogin    = "/login"
+	actionCallback = "/callback"
+	actionLogout   = "/logout"
 )
 
-var authRoutes = map[string]func(*Handler, http.ResponseWriter, *http.Request) error{
-	pathLogin:    (*Handler).serveLogin,
-	pathCallback: (*Handler).serveCallback,
-	pathLogout:   (*Handler).serveLogout,
+// authHandler resolves the part of the request path below path_prefix to an
+// endpoint, or nil when the request is not an auth request.
+func (h *Handler) authHandler(p string) func(http.ResponseWriter, *http.Request) error {
+	switch p {
+	case actionLogin:
+		return h.serveLogin
+	case actionCallback:
+		return h.serveCallback
+	case actionLogout:
+		return h.serveLogout
+	}
+	return nil
 }
 
 type Handler struct {
@@ -50,6 +57,16 @@ type Handler struct {
 	ClientSecret string `json:"client_secret,omitempty"`
 
 	Scopes []string `json:"scopes,omitempty"`
+
+	// PathPrefix is where the login, callback and logout endpoints live
+	// (default "/auth"). Upstreams often own /auth/* themselves.
+	PathPrefix string `json:"path_prefix,omitempty"`
+
+	// AllowedGroups restricts login to users holding one of these groups. Empty
+	// means no group filtering: whoever the provider authenticates gets in.
+	AllowedGroups []string `json:"allowed_groups,omitempty"`
+	// GroupsClaim is the claim carrying group names (default "groups").
+	GroupsClaim string `json:"groups_claim,omitempty"`
 
 	CookieDomain string         `json:"cookie_domain,omitempty"`
 	CookieName   string         `json:"cookie_name,omitempty"`
@@ -113,8 +130,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return nil
 	}
 
-	if serve, ok := authRoutes[r.URL.Path]; ok {
-		return serve(h, w, r)
+	if p, ok := strings.CutPrefix(r.URL.Path, h.PathPrefix); ok {
+		if serve := h.authHandler(p); serve != nil {
+			return serve(w, r)
+		}
 	}
 
 	h.stripAuthHeaders(r)
@@ -125,7 +144,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 	}
 
-	loginURL := url.URL{Path: pathLogin}
+	loginURL := url.URL{Path: h.PathPrefix + actionLogin}
 	q := loginURL.Query()
 	q.Set("return_to", r.URL.RequestURI())
 	loginURL.RawQuery = q.Encode()

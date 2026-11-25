@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/securecookie"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/hkdf"
 )
 
@@ -166,6 +167,13 @@ func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, sess 
 	encoded, err := h.sessionCodec.Encode(name, sess)
 	if err != nil {
 		return err
+	}
+	// Browsers drop cookies over 4096 bytes, which shows up as a login loop
+	// rather than an error, so warn before it happens.
+	if len(encoded) > 3500 && h.logger != nil {
+		h.logger.Warn("session cookie is close to the browser size limit",
+			zap.Int("bytes", len(encoded)),
+			zap.String("hint", "fewer claims in the ID token, or a provider without refresh tokens"))
 	}
 	http.SetCookie(w, h.makeCookie(r, name, encoded, time.Duration(h.CookieTTL)))
 	return nil

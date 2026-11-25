@@ -21,7 +21,10 @@ example.com {
 
 ## Project status
 
-Early, single-maintainer, used in production on my own homelab. The session cookie format and
+Early, single-maintainer, used in production on my own homelab. Pre-1.0: config keys and cookie
+format may change between minor tags, and a cookie format change logs everyone out (CHANGELOG says
+when). Pin production to a tag — `xcaddy build --with github.com/mingwiki/caddy-auth-oidc@v0.1.0`.
+The session cookie format and
 the `auth_oidc` option names are stable as of now, but this is a small project with no
 compatibility guarantees across majors. Read [Scope](#scope-what-this-plugin-does-and-does-not-do)
 before deploying it somewhere that matters.
@@ -237,6 +240,9 @@ For `file_server`/`webdav` sites, order it before those too
 | `cookie_domain` | Cookie domain; set it to share one session across subdomains | host-only |
 | `cookie_name` | Session cookie name | `caddy_auth_oidc` |
 | `cookie_path` | Cookie path | `/` |
+| `path_prefix` | Where the auth endpoints live | `/auth` |
+| `allowed_groups` | Only users in one of these groups may log in (see below) | *(empty: no filtering)* |
+| `groups_claim` | Claim holding group names | `groups` |
 | `cookie_ttl` | Local session lifetime | `168h` |
 | `state_ttl` | Lifetime of the in-flight login cookie | `10m` |
 | `inject_headers` | Inject identity headers upstream | `false` |
@@ -247,7 +253,7 @@ For `file_server`/`webdav` sites, order it before those too
 
 ## Endpoints
 
-Reserved on every protected site (they sit in front of your upstream, at the site root):
+Reserved on every protected site (they sit in front of your upstream, below `path_prefix`):
 
 | Path | Purpose |
 | --- | --- |
@@ -255,8 +261,60 @@ Reserved on every protected site (they sit in front of your upstream, at the sit
 | `/auth/callback` | Code exchange, token verification, session cookie. |
 | `/auth/logout` | Clears the local cookie, then the provider session if advertised. |
 
-Paths are fixed; the plugin cannot be mounted under a subpath. If an upstream app needs
-`/auth/*` for itself, it will not get those three paths.
+The three paths are fixed relative to `path_prefix`. If an upstream app needs `/auth/*` for
+itself, move the plugin out of the way with `path_prefix /sso`. The plugin cannot be mounted
+below a subpath of the site (there is no `handle_path` interaction to worry about).
+
+---
+
+## Group authorization (optional)
+
+By default any user the provider authenticates may log in. `allowed_groups` narrows that:
+
+```caddyfile
+auth_oidc {
+    provider       https://id.example.com
+    client_id      my-client
+    client_secret  {env.OIDC_CLIENT_SECRET}
+    allowed_groups admins family
+    groups_claim   groups        # default; only change it if your provider differs
+}
+```
+
+- The claim may be a JSON array (`["admin","ops"]`) or a whitespace-separated string
+  (`"admin ops"`). Both are common; unknown shapes are rejected, not ignored.
+- Matching is exact and case-sensitive. No wildcards, no nesting.
+- **Fails closed**: with `allowed_groups` set and no such claim in the token, login is denied with
+  `403` and a `Warn` log — a typo in the claim name should not open the site to everyone.
+- `groups_claim` values that need it: Auth0 uses a namespaced URL
+  (`https://you.example.com/groups`), GitLab uses `groups_direct`, Keycloak/Authentik/Zitadel
+  use the mapper's claim name (`groups` by default).
+- If your IdP can restrict a client's users by group (Pocket ID can, per OIDC client), doing it
+  there is more robust: the token then never leaves the IdP for a user who may not log in.
+
+## Tested providers
+
+| Provider | Status | Notes |
+| --- | --- | --- |
+| Pocket ID | verified | Used in production by the author. Emits no group claim, so `allowed_groups` needs a provider that does (or per-client restriction inside Pocket ID). |
+| Keycloak | untested | Group mapper outputs an array; set `groups_claim` to the mapper's claim name. |
+| Authentik | untested | `groups` array scope. |
+| Zitadel, Auth0, Google, GitLab | untested | Auth0 needs a namespaced claim URL; GitLab uses `groups_direct`. |
+
+"Untested" means the code path is the same standard OIDC discovery + code flow, but nobody has
+run it and written down the config. A PR adding a working snippet for a provider is the single
+most useful contribution.
+
+## Non-goals
+
+These are deliberate, not backlog items. Each one is a different project:
+
+- **Authorization policies / per-path ACLs.** Use Authelia, Authentik, or greenpau/caddy-security.
+  This plugin answers "is this an authenticated user?", not "may this user see `/admin`?".
+- **Token pass-through (access token / ID token upstream).** Apps that call APIs *as* the user need
+  `oauth2-proxy` or the app's own OIDC support. Only the four identity headers are forwarded.
+- **Multiple providers per site, or per-path providers.** One site, one provider.
+- **User database, portal, registration, MFA enrolment.** The IdP owns all of that.
 
 ---
 
@@ -303,7 +361,21 @@ Layout: `config.go` (defaults/validation), `caddyfile.go` (Caddyfile parsing), `
 | `401 Unauthorized` right after the provider redirect | `state` cookie missing/expired (`state_ttl`), clock skew on `exp`, or wrong `issuer_url` (token `iss` mismatch) |
 | Login works, app sees no user | `inject_headers` not enabled, or the app reads different header names than `header_prefix` |
 | Everyone logged out after a provider change | `client_secret` rotated → cookie keys changed |
+| `403` right after a successful provider login | `allowed_groups` is set but the token has no `groups_claim`, or the group name differs. The log line names the claim and the groups the user does hold. |
+| The app's own `/auth/*` pages return the plugin's endpoints | Set `path_prefix /sso` (or any other prefix). |
 | `state mismatch` in logs | Two tabs racing the same flow, or a stale flow cookie (>10m between login and callback) |
+
+## Contributing
+
+Bug reports are most useful with: provider + version, the `auth_oidc` block you used, and the
+relevant `Warn`/`Error` lines from Caddy's log. Scope is intentionally small — see
+[Non-goals](#non-goals) before proposing a feature.
+
+Good first contributions:
+
+- Add your provider to [Tested providers](#tested-providers) with a config snippet that works.
+- Improve the troubleshooting table with a failure you actually hit.
+- Write a test for an edge case in the flow (see `handler_test.go` for the fake provider).
 
 ## License
 

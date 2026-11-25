@@ -66,5 +66,5 @@ func generatePKCE() (verifier, challenge string, err error) {
 }
 
 func (h *Handler) getCallbackURL(r *http.Request) string {
-	return h.getAbsoluteRedirectURL(r, pathCallback)
+	return h.getAbsoluteRedirectURL(r, h.PathPrefix+actionCallback)
 }

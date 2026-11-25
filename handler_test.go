@@ -30,6 +30,7 @@ type idp struct {
 	mu           sync.Mutex
 	down         bool
 	nonce        string
+	extraClaims  string
 	failRefresh  bool
 	refreshCalls int
 	lastForm     url.Values
@@ -106,9 +107,12 @@ func (p *idp) serveToken(w http.ResponseWriter, r *http.Request) {
 
 func (p *idp) sign(nonce string) string {
 	now := time.Now()
+	p.mu.Lock()
+	extra := p.extraClaims
+	p.mu.Unlock()
 	claims := fmt.Sprintf(
-		`{"iss":%q,"aud":"client","sub":"user-1","email":"user@example.com","name":"User One","nonce":%q,"iat":%d,"exp":%d}`,
-		p.srv.URL, nonce, now.Unix(), now.Add(time.Hour).Unix())
+		`{"iss":%q,"aud":"client","sub":"user-1","email":"user@example.com","name":"User One","nonce":%q,"iat":%d,"exp":%d%s}`,
+		p.srv.URL, nonce, now.Unix(), now.Add(time.Hour).Unix(), extra)
 	return oidctest.SignIDToken(p.key, p.keyID, oidc.ES256, claims)
 }
 
@@ -122,6 +126,14 @@ func (p *idp) setNonce(nonce string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.nonce = nonce
+}
+
+// setClaims appends a raw JSON fragment to the ID token claims, e.g.
+// `,"groups":["team-a"]`.
+func (p *idp) setClaims(fragment string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.extraClaims = fragment
 }
 
 func (p *idp) setFailRefresh(fail bool) {
@@ -537,14 +549,123 @@ func TestServeHTTP_ProviderOutageReturns503ThenRecovers(t *testing.T) {
 func TestAuthEndpointsAnswer503BeforeProviderIsReady(t *testing.T) {
 	h := newHandler(t, newIdP(t)) // deliberately without initOIDC
 
-	for path, serve := range authRoutes {
+	for _, action := range []string{actionLogin, actionCallback, actionLogout} {
+		path := h.PathPrefix + action
+		serve := h.authHandler(action)
+		if serve == nil {
+			t.Fatalf("%s: no handler", path)
+		}
 		w := httptest.NewRecorder()
 		r := httptest.NewRequest(http.MethodGet, "http://example.com"+path, nil)
-		if err := serve(h, w, r); err != nil {
+		if err := serve(w, r); err != nil {
 			t.Fatalf("%s: %v", path, err)
 		}
 		if w.Code != http.StatusServiceUnavailable {
 			t.Fatalf("%s: expected 503, got %d", path, w.Code)
 		}
+	}
+}
+
+// loginWith runs the whole flow and returns the callback response.
+func loginWith(t *testing.T, h *Handler, provider *idp) *httptest.ResponseRecorder {
+	t.Helper()
+	flowCookie, authURL := login(t, h, provider, "/app")
+	return callback(t, h, flowCookie, "state="+authURL.Query().Get("state")+"&code=abc")
+}
+
+func TestGroupsAllowedFromArrayClaim(t *testing.T) {
+	provider := newIdP(t)
+	provider.setClaims(`,"groups":["team-b","team-a"]`)
+	h := newTestHandler(t, provider)
+	h.AllowedGroups = []string{"team-a"}
+
+	if w := loginWith(t, h, provider); w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302 (body %q)", w.Code, w.Body.String())
+	}
+}
+
+func TestGroupsDeniedFromArrayClaim(t *testing.T) {
+	provider := newIdP(t)
+	provider.setClaims(`,"groups":["team-b"]`)
+	h := newTestHandler(t, provider)
+	h.AllowedGroups = []string{"team-a"}
+
+	w := loginWith(t, h, provider)
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %q)", w.Code, w.Body.String())
+	}
+	for _, c := range w.Result().Cookies() {
+		if c.Name == h.CookieName {
+			t.Fatal("denied login must not set a session cookie")
+		}
+	}
+}
+
+func TestGroupsDeniedWhenClaimMissing(t *testing.T) {
+	provider := newIdP(t)
+	h := newTestHandler(t, provider)
+	h.AllowedGroups = []string{"team-a"}
+
+	if w := loginWith(t, h, provider); w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a missing claim (body %q)", w.Code, w.Body.String())
+	}
+}
+
+func TestGroupsAllowedFromSingleStringClaim(t *testing.T) {
+	provider := newIdP(t)
+	provider.setClaims(`,"groups":"team-a team-c"`)
+	h := newTestHandler(t, provider)
+	h.AllowedGroups = []string{"team-c"}
+
+	if w := loginWith(t, h, provider); w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302 (body %q)", w.Code, w.Body.String())
+	}
+}
+
+func TestGroupsHonoursConfiguredClaimName(t *testing.T) {
+	provider := newIdP(t)
+	provider.setClaims(`,"roles":["admin"]`)
+	h := newTestHandler(t, provider)
+	h.GroupsClaim = "roles"
+	h.AllowedGroups = []string{"admin"}
+
+	if w := loginWith(t, h, provider); w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302 (body %q)", w.Code, w.Body.String())
+	}
+}
+
+func TestPathPrefixMovesEndpoints(t *testing.T) {
+	provider := newIdP(t)
+	h := newTestHandler(t, provider)
+	h.PathPrefix = "/sso/auth"
+
+	req := httptest.NewRequest(http.MethodGet, "http://app.example.com/sso/auth/login?return_to=%2Fapp", nil)
+	w := httptest.NewRecorder()
+	if err := h.ServeHTTP(w, req, (&nextHandler{}).handler()); err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302 (body %q)", w.Code, w.Body.String())
+	}
+	authURL, err := url.Parse(w.Header().Get("Location"))
+	if err != nil {
+		t.Fatalf("parse authorize URL: %v", err)
+	}
+	if got, want := authURL.Query().Get("redirect_uri"), "http://app.example.com/sso/auth/callback"; got != want {
+		t.Fatalf("redirect_uri = %q, want %q", got, want)
+	}
+
+	// A path that merely starts with the prefix must not be treated as an endpoint.
+	req = httptest.NewRequest(http.MethodGet, "http://app.example.com/sso/auth/loginx", nil)
+	w = httptest.NewRecorder()
+	next := &nextHandler{}
+	if err := h.ServeHTTP(w, req, next.handler()); err != nil {
+		t.Fatalf("ServeHTTP: %v", err)
+	}
+	if next.called {
+		t.Fatal("/sso/auth/loginx must not be treated as an auth endpoint")
+	}
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302 to login", w.Code)
 	}
 }

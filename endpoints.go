@@ -144,6 +144,11 @@ func (h *Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 
+	if err := h.checkGroups(idToken, r.RemoteAddr); err != nil {
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return nil
+	}
+
 	sess := sessionData{
 		IDToken:      rawIDToken,
 		RefreshToken: oauth2Token.RefreshToken,

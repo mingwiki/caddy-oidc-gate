@@ -48,6 +48,22 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				h.Scopes = args
+			case "path_prefix":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				h.PathPrefix = d.Val()
+			case "allowed_groups":
+				args := d.RemainingArgs()
+				if len(args) == 0 {
+					return d.ArgErr()
+				}
+				h.AllowedGroups = args
+			case "groups_claim":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				h.GroupsClaim = d.Val()
 			case "cookie_domain":
 				if !d.NextArg() {
 					return d.ArgErr()
