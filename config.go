@@ -1,7 +1,8 @@
 package caddyauthoidc
 
 import (
-	"fmt"
+	"errors"
+	"slices"
 	"strings"
 	"time"
 
@@ -53,25 +54,28 @@ func (h *Handler) applyDefaults() {
 
 func (h Handler) validate() error {
 	if strings.TrimSpace(h.Provider) == "" {
-		return fmt.Errorf("provider is required")
+		return errors.New("provider is required")
 	}
 	if strings.TrimSpace(h.ClientID) == "" {
-		return fmt.Errorf("client_id is required")
+		return errors.New("client_id is required")
 	}
 	if strings.TrimSpace(h.ClientSecret) == "" {
-		return fmt.Errorf("client_secret is required")
+		return errors.New("client_secret is required")
 	}
 	if strings.TrimSpace(h.HeaderPrefix) == "" {
-		return fmt.Errorf("header_prefix must not be empty")
+		return errors.New("header_prefix must not be empty")
 	}
 	if h.CookieTTL <= 0 {
-		return fmt.Errorf("cookie_ttl must be positive")
+		return errors.New("cookie_ttl must be positive")
 	}
 	if h.StateTTL <= 0 {
-		return fmt.Errorf("state_ttl must be positive")
+		return errors.New("state_ttl must be positive")
+	}
+	if !slices.Contains(h.Scopes, "openid") {
+		return errors.New("scopes must include \"openid\"")
 	}
 	if h.RefreshLeeway < 0 {
-		return fmt.Errorf("refresh_leeway must be non-negative")
+		return errors.New("refresh_leeway must be non-negative")
 	}
 	return nil
 }

@@ -13,6 +13,18 @@ import (
 )
 
 func (h Handler) serveLogin(w http.ResponseWriter, r *http.Request) error {
+	w.Header().Set("Cache-Control", "no-store")
+
+	returnTo := r.URL.Query().Get("return_to")
+	if !isLocalPath(returnTo) {
+		returnTo = "/"
+	}
+	// Already logged in: skip the provider round trip.
+	if _, err := h.readSessionCookie(r); err == nil {
+		http.Redirect(w, r, returnTo, http.StatusFound)
+		return nil
+	}
+
 	state, err := generateRandomString(32)
 	if err != nil {
 		h.logger.Error("failed to generate state", zap.Error(err))
@@ -32,11 +44,6 @@ func (h Handler) serveLogin(w http.ResponseWriter, r *http.Request) error {
 		h.logger.Error("failed to generate pkce", zap.Error(err))
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return nil
-	}
-
-	returnTo := r.URL.Query().Get("return_to")
-	if !isLocalPath(returnTo) {
-		returnTo = "/"
 	}
 
 	fs := flowState{
@@ -64,6 +71,8 @@ func (h Handler) serveLogin(w http.ResponseWriter, r *http.Request) error {
 }
 
 func (h Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
+	w.Header().Set("Cache-Control", "no-store")
+
 	fs, err := h.readFlowStateCookie(r)
 	if err != nil {
 		h.logger.Warn("failed to read flow state cookie", zap.Error(err))
@@ -124,7 +133,7 @@ func (h Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	if idToken.Nonce != fs.Nonce {
-		h.logger.Warn("nonce mismatch")
+		h.logger.Warn("nonce mismatch", zap.String("sub", idToken.Subject))
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return nil
 	}
@@ -141,11 +150,24 @@ func (h Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 
+	h.logger.Info("login succeeded",
+		zap.String("sub", idToken.Subject),
+		zap.String("remote_ip", r.RemoteAddr))
 	http.Redirect(w, r, fs.ReturnTo, http.StatusFound)
 	return nil
 }
 
 func (h Handler) serveLogout(w http.ResponseWriter, r *http.Request) error {
+	w.Header().Set("Cache-Control", "no-store")
+
+	// Logout is a state change reachable via top-level GET navigation, so refuse
+	// cross-site requests (logout CSRF).
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		h.logger.Warn("cross-site logout blocked", zap.String("remote_ip", r.RemoteAddr))
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return nil
+	}
+
 	h.clearFlowStateCookie(w, r)
 
 	// Read session before clearing to get ID token hint if possible

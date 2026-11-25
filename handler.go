@@ -2,6 +2,7 @@ package caddyauthoidc
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -92,8 +93,8 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 
 	h.stripAuthHeaders(r)
 
-	if sess, ok := h.session(w, r); ok {
-		if !h.InjectHeaders || h.injectHeaders(w, r, sess.IDToken) {
+	if idToken, ok := h.authenticate(w, r); ok {
+		if !h.InjectHeaders || h.injectHeaders(w, r, idToken) {
 			return next.ServeHTTP(w, r)
 		}
 	}
@@ -106,19 +107,49 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 	return nil
 }
 
-// session returns the session for r when its cookie is valid, refreshing the
-// ID token when it is near expiry. A session that cannot be refreshed is
-// cleared so the browser performs a clean login instead of retrying the
-// refresh on every request.
-func (h *Handler) session(w http.ResponseWriter, r *http.Request) (sessionData, bool) {
+// authenticate returns the verified ID token for the request, refreshing the
+// session when its ID token is near expiry. A session that cannot be refreshed
+// or verified is cleared so the browser performs a clean login instead of
+// retrying on every request.
+func (h *Handler) authenticate(w http.ResponseWriter, r *http.Request) (*oidc.IDToken, bool) {
 	sess, err := h.readSessionCookie(r)
 	if err != nil {
-		return sessionData{}, false
-	}
-	if sess.RefreshToken == "" || time.Until(sess.ExpiresAt) >= time.Duration(h.RefreshLeeway) {
-		return sess, true
+		return nil, false
 	}
 
+	refreshed := false
+	if sess.RefreshToken != "" && time.Until(sess.ExpiresAt) < time.Duration(h.RefreshLeeway) {
+		sess, err = h.refresh(r, sess)
+		if err != nil {
+			h.logger.Warn("token refresh failed, clearing session", zap.Error(err))
+			h.clearSessionCookie(w, r)
+			return nil, false
+		}
+		refreshed = true
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+
+	idToken, err := h.verifier.Verify(ctx, sess.IDToken)
+	if err != nil {
+		h.logger.Warn("failed to verify session id token, clearing session", zap.Error(err))
+		h.clearSessionCookie(w, r)
+		return nil, false
+	}
+
+	if refreshed {
+		sess.ExpiresAt = idToken.Expiry
+		if err := h.setSessionCookie(w, r, sess); err != nil {
+			h.logger.Error("failed to set refreshed session cookie", zap.Error(err))
+		}
+	}
+	return idToken, true
+}
+
+// refresh exchanges the refresh token for a new session token set. The returned
+// session is not verified here; authenticate verifies it once for every request.
+func (h *Handler) refresh(r *http.Request, sess sessionData) (sessionData, error) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 
@@ -126,35 +157,18 @@ func (h *Handler) session(w http.ResponseWriter, r *http.Request) (sessionData, 
 	// is enough to request a new pair.
 	token, err := h.oauth2Config.TokenSource(ctx, &oauth2.Token{RefreshToken: sess.RefreshToken}).Token()
 	if err != nil {
-		h.logger.Warn("token refresh failed, clearing session", zap.Error(err))
-		h.clearSessionCookie(w, r)
-		return sessionData{}, false
+		return sessionData{}, err
 	}
 
 	rawIDToken, _ := token.Extra("id_token").(string)
-	idToken, err := h.verifier.Verify(ctx, rawIDToken)
-	if err != nil {
-		h.logger.Warn("failed to verify refreshed id token, clearing session", zap.Error(err))
-		h.clearSessionCookie(w, r)
-		return sessionData{}, false
+	if rawIDToken == "" {
+		return sessionData{}, errors.New("refresh response has no id_token")
 	}
-
-	var claims map[string]interface{}
-	if err := idToken.Claims(&claims); err != nil {
-		h.logger.Warn("failed to decode refreshed id token claims, clearing session", zap.Error(err))
-		h.clearSessionCookie(w, r)
-		return sessionData{}, false
-	}
-
 	sess.IDToken = rawIDToken
 	if token.RefreshToken != "" {
 		sess.RefreshToken = token.RefreshToken
 	}
-	sess.ExpiresAt = idToken.Expiry
-	if err := h.setSessionCookie(w, r, sess); err != nil {
-		h.logger.Error("failed to set refreshed session cookie", zap.Error(err))
-	}
-	return sess, true
+	return sess, nil
 }
 
 // stripAuthHeaders removes client-supplied headers with the configured prefix
@@ -172,19 +186,9 @@ func (h Handler) stripAuthHeaders(r *http.Request) {
 }
 
 // injectHeaders adds the verified claims to the request. It reports whether the
-// ID token could be verified; an unverifiable session is cleared and the caller
-// redirects to login.
-func (h Handler) injectHeaders(w http.ResponseWriter, r *http.Request, rawIDToken string) bool {
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-
-	idToken, err := h.verifier.Verify(ctx, rawIDToken)
-	if err != nil {
-		h.logger.Warn("failed to verify session id token, clearing session", zap.Error(err))
-		h.clearSessionCookie(w, r)
-		return false
-	}
-
+// claims could be decoded; on failure the session is cleared so the caller
+// redirects to login instead of forwarding an unauthenticated request.
+func (h Handler) injectHeaders(w http.ResponseWriter, r *http.Request, idToken *oidc.IDToken) bool {
 	var claims map[string]interface{}
 	if err := idToken.Claims(&claims); err != nil {
 		h.logger.Warn("failed to decode session id token claims, clearing session", zap.Error(err))
