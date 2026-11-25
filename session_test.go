@@ -1,4 +1,4 @@
-package caddyauthoidc
+package caddyoidcgate
 
 import (
 	"errors"
@@ -10,6 +10,9 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 )
+
+// testState is a realistic state value: base64url, 32 bytes.
+const testState = "0123456789abcdef0123456789abcdef"
 
 func TestFlowStateCookie_RoundTripAndAttributes(t *testing.T) {
 	h := &Handler{
@@ -29,7 +32,7 @@ func TestFlowStateCookie_RoundTripAndAttributes(t *testing.T) {
 
 	in := flowState{
 		Version:      cookieVersion,
-		State:        "state123",
+		State:        testState,
 		Nonce:        "nonce123",
 		PKCEVerifier: "verifier123",
 		ReturnTo:     "/app",
@@ -44,7 +47,7 @@ func TestFlowStateCookie_RoundTripAndAttributes(t *testing.T) {
 		t.Fatalf("expected 1 Set-Cookie, got %d", len(cookies))
 	}
 	c := cookies[0]
-	if c.Name != h.flowStateCookieName() {
+	if c.Name != h.flowStateCookieName(in.State) {
 		t.Fatalf("unexpected cookie name: %q", c.Name)
 	}
 	if c.Domain != strings.TrimPrefix(h.CookieDomain, ".") {
@@ -69,7 +72,7 @@ func TestFlowStateCookie_RoundTripAndAttributes(t *testing.T) {
 	r2 := httptest.NewRequest(http.MethodGet, "http://app.example.com/auth/callback", nil)
 	r2.AddCookie(c)
 
-	out, err := h.readFlowStateCookie(r2)
+	out, err := h.readFlowStateCookie(r2, in.State)
 	if err != nil {
 		t.Fatalf("readFlowStateCookie: %v", err)
 	}
@@ -92,7 +95,7 @@ func TestFlowStateCookie_TTLExpiry(t *testing.T) {
 
 	r := httptest.NewRequest(http.MethodGet, "http://example.com/auth/login", nil)
 	w := httptest.NewRecorder()
-	if err := h.setFlowStateCookie(w, r, flowState{State: "s"}); err != nil {
+	if err := h.setFlowStateCookie(w, r, flowState{State: testState}); err != nil {
 		t.Fatalf("setFlowStateCookie: %v", err)
 	}
 	c := w.Result().Cookies()[0]
@@ -102,7 +105,7 @@ func TestFlowStateCookie_TTLExpiry(t *testing.T) {
 	r2 := httptest.NewRequest(http.MethodGet, "http://example.com/auth/callback", nil)
 	r2.AddCookie(c)
 
-	_, err := h.readFlowStateCookie(r2)
+	_, err := h.readFlowStateCookie(r2, testState)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -190,8 +193,8 @@ func TestFlowStateCookie_RejectsUnknownVersion(t *testing.T) {
 		t.Fatalf("initCookieCodecs: %v", err)
 	}
 
-	name := h.flowStateCookieName()
-	encoded, err := h.flowCodec.Encode(name, flowState{Version: cookieVersion + 1, State: "s", Nonce: "n"})
+	name := h.flowStateCookieName(testState)
+	encoded, err := h.flowCodec.Encode(name, flowState{Version: cookieVersion + 1, State: testState, Nonce: "n"})
 	if err != nil {
 		t.Fatalf("encode: %v", err)
 	}
@@ -199,7 +202,7 @@ func TestFlowStateCookie_RejectsUnknownVersion(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
 	r.AddCookie(&http.Cookie{Name: name, Value: encoded})
 
-	if _, err := h.readFlowStateCookie(r); !errors.Is(err, ErrCookieInvalid) {
+	if _, err := h.readFlowStateCookie(r, testState); !errors.Is(err, ErrCookieInvalid) {
 		t.Fatalf("expected ErrCookieInvalid for unknown version, got %v", err)
 	}
 }
@@ -218,7 +221,7 @@ func TestClearCookies(t *testing.T) {
 	r := httptest.NewRequest(http.MethodGet, "https://example.com/auth/logout", nil)
 	w := httptest.NewRecorder()
 
-	h.clearFlowStateCookie(w, r)
+	h.clearFlowStateCookie(w, r, testState)
 	h.clearSessionCookie(w, r)
 
 	cookies := w.Result().Cookies()

@@ -1,4 +1,4 @@
-package caddyauthoidc
+package caddyoidcgate
 
 import (
 	"crypto/sha256"
@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -44,9 +45,18 @@ type sessionData struct {
 	ExpiresAt    time.Time
 }
 
-func (h *Handler) flowStateCookieName() string {
-	return h.CookieName + flowCookieSuffix
+// flowStateCookieName scopes a flow cookie to one login attempt. Browsers run
+// several flows in parallel (favicon, prefetch, a second tab) and a single
+// shared cookie name lets the last one overwrite the others' state, which shows
+// up as a spurious "state mismatch" on the first visit.
+func (h *Handler) flowStateCookieName(state string) string {
+	return h.CookieName + flowCookieSuffix + "_" + state
 }
+
+// statePattern bounds what the callback may use as a cookie name; states are
+// base64url of 32 random bytes, anything else is rejected before it reaches
+// the cookie jar.
+var statePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{16,128}$`)
 
 func (h *Handler) initCookieCodecs() error {
 	hashKey, blockKey, err := deriveCookieKeys(h.ClientSecret, h.ClientID, h.Provider)
@@ -121,7 +131,7 @@ func (h *Handler) setFlowStateCookie(w http.ResponseWriter, r *http.Request, sta
 		return errors.New("auth_oidc: flow codec not initialized")
 	}
 	state.Version = cookieVersion
-	name := h.flowStateCookieName()
+	name := h.flowStateCookieName(state.State)
 	encoded, err := h.flowCodec.Encode(name, state)
 	if err != nil {
 		return err
@@ -130,8 +140,11 @@ func (h *Handler) setFlowStateCookie(w http.ResponseWriter, r *http.Request, sta
 	return nil
 }
 
-func (h *Handler) readFlowStateCookie(r *http.Request) (flowState, error) {
-	name := h.flowStateCookieName()
+func (h *Handler) readFlowStateCookie(r *http.Request, state string) (flowState, error) {
+	if !statePattern.MatchString(state) {
+		return flowState{}, ErrCookieNotFound
+	}
+	name := h.flowStateCookieName(state)
 	c, err := r.Cookie(name)
 	if err != nil {
 		if errors.Is(err, http.ErrNoCookie) {
@@ -154,8 +167,11 @@ func (h *Handler) readFlowStateCookie(r *http.Request) (flowState, error) {
 	return out, nil
 }
 
-func (h *Handler) clearFlowStateCookie(w http.ResponseWriter, r *http.Request) {
-	http.SetCookie(w, h.makeClearCookie(r, h.flowStateCookieName()))
+func (h *Handler) clearFlowStateCookie(w http.ResponseWriter, r *http.Request, state string) {
+	if !statePattern.MatchString(state) {
+		return
+	}
+	http.SetCookie(w, h.makeClearCookie(r, h.flowStateCookieName(state)))
 }
 
 func (h *Handler) setSessionCookie(w http.ResponseWriter, r *http.Request, sess sessionData) error {

@@ -4,4 +4,4 @@
 //
 // Only authentication is in scope — authorization (which user may log in) is
 // the provider's job. See README.md for the full contract.
-package caddyauthoidc
+package caddyoidcgate

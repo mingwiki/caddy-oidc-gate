@@ -1,4 +1,4 @@
-package caddyauthoidc
+package caddyoidcgate
 
 import (
 	"crypto/tls"

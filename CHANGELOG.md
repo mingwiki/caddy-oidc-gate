@@ -3,6 +3,22 @@
 Notable changes per tag. This project is pre-1.0: config keys and the cookie format may change
 between minor tags.
 
+## v0.1.1 — 2026-11-26
+
+### Fixed
+
+- Spurious `Unauthorized` on the first visit: the flow cookie had one fixed name, so a second
+  login flow started while the first was in flight (favicon fetch, prefetch, second tab) replaced
+  its state and the callback died with `state mismatch`. Flow cookies are now named per attempt
+  (`<cookie>_flow_<state>`); parallel flows no longer interfere. The state in the callback is
+  validated against a base64url pattern before it is used as a cookie name.
+
+### Changed
+
+- Repository and Go module renamed to `github.com/mingwiki/caddy-oidc-gate`. The module ID
+  (`http.handlers.auth_oidc`) and the Caddyfile directive (`auth_oidc`) are unchanged, so existing
+  configurations keep working — only the `--with` path in your build has to be updated.
+
 ## v0.1.0 — 2026-11-25
 
 First tagged release. What is here:

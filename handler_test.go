@@ -1,4 +1,4 @@
-package caddyauthoidc
+package caddyoidcgate
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -667,5 +668,49 @@ func TestPathPrefixMovesEndpoints(t *testing.T) {
 	}
 	if w.Code != http.StatusFound {
 		t.Fatalf("status = %d, want 302 to login", w.Code)
+	}
+}
+
+// Regression: a second login flow started while the first is in flight (favicon
+// fetch, prefetch, second tab) used to overwrite the single flow cookie, so the
+// first callback died with "state mismatch" and the user had to reload.
+func TestParallelLoginsDoNotClobberEachOther(t *testing.T) {
+	provider := newIdP(t)
+	h := newTestHandler(t, provider)
+
+	cookieA, authA := login(t, h, provider, "/a")
+	_, authB := login(t, h, provider, "/b")
+	if authA.Query().Get("state") == authB.Query().Get("state") {
+		t.Fatal("two flows produced the same state")
+	}
+	// The token endpoint echoes whatever nonce was set last; the callback for A
+	// must be verified against A's nonce.
+	provider.setNonce(authA.Query().Get("nonce"))
+
+	w := callback(t, h, cookieA, "state="+authA.Query().Get("state")+"&code=abc")
+	if w.Code != http.StatusFound {
+		t.Fatalf("status = %d, want 302 (body %q)", w.Code, w.Body.String())
+	}
+	if got := w.Header().Get("Location"); got != "/a" {
+		t.Fatalf("Location = %q, want /a", got)
+	}
+}
+
+func TestCallbackRejectsMalformedState(t *testing.T) {
+	provider := newIdP(t)
+	h := newTestHandler(t, provider)
+	cookie, authURL := login(t, h, provider, "/app")
+
+	for _, state := range []string{
+		"../../etc/passwd",
+		"a;b",
+		"short",
+		strings.Repeat("x", 200),
+		authURL.Query().Get("state") + "\r\n",
+	} {
+		w := callback(t, h, cookie, "state="+url.QueryEscape(state)+"&code=abc")
+		if w.Code != http.StatusUnauthorized {
+			t.Fatalf("state %q: status = %d, want 401", state, w.Code)
+		}
 	}
 }

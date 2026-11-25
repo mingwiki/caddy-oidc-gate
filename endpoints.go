@@ -1,4 +1,4 @@
-package caddyauthoidc
+package caddyoidcgate
 
 import (
 	"context"
@@ -79,17 +79,10 @@ func (h *Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 	}
 	w.Header().Set("Cache-Control", "no-store")
 
-	fs, err := h.readFlowStateCookie(r)
-	if err != nil {
-		h.logger.Warn("failed to read flow state cookie", zap.Error(err))
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return nil
-	}
-
-	// Clear flow state cookie
-	h.clearFlowStateCookie(w, r)
-
 	q := r.URL.Query()
+	state := q.Get("state")
+	h.clearFlowStateCookie(w, r, state)
+
 	if providerErr := q.Get("error"); providerErr != "" {
 		h.logger.Warn("provider returned error",
 			zap.String("error", providerErr),
@@ -98,7 +91,14 @@ func (h *Handler) serveCallback(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 
-	if subtle.ConstantTimeCompare([]byte(q.Get("state")), []byte(fs.State)) != 1 {
+	fs, err := h.readFlowStateCookie(r, state)
+	if err != nil {
+		h.logger.Warn("failed to read flow state cookie", zap.Error(err))
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return nil
+	}
+
+	if subtle.ConstantTimeCompare([]byte(state), []byte(fs.State)) != 1 {
 		h.logger.Warn("state mismatch")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return nil
@@ -182,7 +182,8 @@ func (h *Handler) serveLogout(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 
-	h.clearFlowStateCookie(w, r)
+	// Flow cookies are now scoped per login attempt, so there is nothing to
+	// clear here; they expire after state_ttl on their own.
 
 	// Read session before clearing to get ID token hint if possible
 	var idTokenHint string

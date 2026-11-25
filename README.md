@@ -1,4 +1,4 @@
-# caddy-auth-oidc
+# caddy-oidc-gate
 
 OIDC login for Caddy-served sites, as a native Caddy v2 handler. No extra container, no
 auth proxy, one cookie per site (or per domain for SSO).
@@ -23,7 +23,7 @@ example.com {
 
 Early, single-maintainer, used in production on my own homelab. Pre-1.0: config keys and cookie
 format may change between minor tags, and a cookie format change logs everyone out (CHANGELOG says
-when). Pin production to a tag — `xcaddy build --with github.com/mingwiki/caddy-auth-oidc@v0.1.0`.
+when). Pin production to a tag — `xcaddy build --with github.com/mingwiki/caddy-oidc-gate@v0.1.1`.
 The session cookie format and
 the `auth_oidc` option names are stable as of now, but this is a small project with no
 compatibility guarantees across majors. Read [Scope](#scope-what-this-plugin-does-and-does-not-do)
@@ -191,14 +191,14 @@ calls if you want to see PKCE and the state cookie.
 ## Build
 
 ```bash
-xcaddy build --with github.com/mingwiki/caddy-auth-oidc
+xcaddy build --with github.com/mingwiki/caddy-oidc-gate
 ```
 
 With extra plugins (e.g. WebDAV, DNS challenge):
 
 ```bash
 xcaddy build \
-    --with github.com/mingwiki/caddy-auth-oidc \
+    --with github.com/mingwiki/caddy-oidc-gate \
     --with github.com/mholt/caddy-webdav \
     --with github.com/caddy-dns/alidns
 ```
@@ -207,7 +207,7 @@ Docker:
 
 ```dockerfile
 FROM caddy:2-builder AS builder
-RUN xcaddy build --with github.com/mingwiki/caddy-auth-oidc
+RUN xcaddy build --with github.com/mingwiki/caddy-oidc-gate
 
 FROM caddy:2
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
@@ -330,7 +330,7 @@ golangci-lint run                 # optional
 Build against local sources:
 
 ```bash
-xcaddy build --with github.com/mingwiki/caddy-auth-oidc=./
+xcaddy build --with github.com/mingwiki/caddy-oidc-gate=./
 ./caddy run --config Caddyfile
 ```
 
